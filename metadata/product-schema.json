@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Product Metadata Schema",
+  "description": "Schema for product metadata stored on IPFS",
+  "type": "object",
+  "required": [
+    "name",
+    "productType",
+    "manufacturer",
+    "serialNumber",
+    "manufactureDate",
+    "warrantyPeriod"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Product name or model"
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed product description"
+    },
+    "productType": {
+      "type": "string",
+      "enum": ["physical", "digital"],
+      "description": "Type of product"
+    },
+    "category": {
+      "type": "string",
+      "description": "Product category (e.g., electronics, clothing, software)"
+    },
+    "manufacturer": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Manufacturer/brand name"
+        },
+        "address": {
+          "type": "string",
+          "description": "Manufacturer's physical address"
+        },
+        "country": {
+          "type": "string",
+          "description": "Country of origin"
+        },
+        "website": {
+          "type": "string",
+          "format": "uri",
+          "description": "Manufacturer's website"
+        }
+      }
+    },
+    "serialNumber": {
+      "type": "string",
+      "description": "Unique serial number"
+    },
+    "model": {
+      "type": "string",
+      "description": "Product model number"
+    },
+    "manufactureDate": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Manufacturing date in ISO 8601 format"
+    },
+    "warrantyPeriod": {
+      "type": "integer",
+      "description": "Warranty period in days"
+    },
+    "warrantyDetails": {
+      "type": "string",
+      "description": "Detailed warranty information"
+    },
+    "specifications": {
+      "type": "object",
+      "description": "Product specifications as key-value pairs"
+    },
+    "images": {
+      "type": "array",
+      "description": "Array of product images",
+      "items": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "IPFS URL of the image"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["main", "detail", "packaging", "certificate"],
+            "description": "Type of image"
+          },
+          "description": {
+            "type": "string",
+            "description": "Image description"
+          }
+        }
+      }
+    },
+    "documents": {
+      "type": "array",
+      "description": "Related documents (manuals, certificates, etc.)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Document name"
+          },
+          "url": {
+            "type": "string",
+            "description": "IPFS URL of the document"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["manual", "certificate", "warranty", "other"],
+            "description": "Document type"
+          }
+        }
+      }
+    },
+    "certifications": {
+      "type": "array",
+      "description": "Product certifications",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Certification name"
+          },
+          "certifyingBody": {
+            "type": "string",
+            "description": "Organization that provided certification"
+          },
+          "certificateNumber": {
+            "type": "string",
+            "description": "Certificate number or ID"
+          },
+          "issueDate": {
+            "type": "string",
+            "format": "date",
+            "description": "Issue date"
+          },
+          "expiryDate": {
+            "type": "string",
+            "format": "date",
+            "description": "Expiry date (if applicable)"
+          }
+        }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "description": "Physical dimensions (for physical products)",
+      "properties": {
+        "length": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "weight": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["cm", "inch", "m"]
+        },
+        "weightUnit": {
+          "type": "string",
+          "enum": ["g", "kg", "lb", "oz"]
+        }
+      }
+    },
+    "digitalDetails": {
+      "type": "object",
+      "description": "Details for digital products",
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Software/license version"
+        },
+        "licenseType": {
+          "type": "string",
+          "enum": ["perpetual", "subscription", "trial"],
+          "description": "Type of license"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Supported platforms"
+        },
+        "downloadUrl": {
+          "type": "string",
+          "description": "Download URL (if applicable)"
+        }
+      }
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Additional custom attributes"
+    }
+  }
+}
+

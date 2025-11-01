@@ -1,0 +1,72 @@
+{
+  "name": "iPhone 15 Pro Max",
+  "description": "Latest flagship smartphone with A17 Pro chip and titanium design",
+  "productType": "physical",
+  "category": "Electronics",
+  "manufacturer": {
+    "name": "Apple Inc.",
+    "address": "One Apple Park Way, Cupertino, CA 95014",
+    "country": "USA",
+    "website": "https://www.apple.com"
+  },
+  "serialNumber": "FFMQ3LL/A-12345",
+  "model": "A3104",
+  "manufactureDate": "2024-09-15T00:00:00Z",
+  "warrantyPeriod": 365,
+  "warrantyDetails": "Limited 1-year warranty covering manufacturing defects. AppleCare+ available for purchase.",
+  "specifications": {
+    "display": "6.7-inch Super Retina XDR display",
+    "processor": "A17 Pro chip",
+    "storage": "256GB",
+    "camera": "48MP Main + 12MP Ultra Wide + 12MP Telephoto",
+    "battery": "Up to 29 hours video playback",
+    "color": "Natural Titanium",
+    "connectivity": "5G, Wi-Fi 6E, Bluetooth 5.3"
+  },
+  "images": [
+    {
+      "url": "ipfs://QmExampleMainImage",
+      "type": "main",
+      "description": "Front view of iPhone 15 Pro Max"
+    },
+    {
+      "url": "ipfs://QmExampleDetailImage",
+      "type": "detail",
+      "description": "Close-up of camera system"
+    }
+  ],
+  "documents": [
+    {
+      "name": "User Manual",
+      "url": "ipfs://QmExampleManual",
+      "type": "manual"
+    },
+    {
+      "name": "Warranty Certificate",
+      "url": "ipfs://QmExampleWarranty",
+      "type": "warranty"
+    }
+  ],
+  "certifications": [
+    {
+      "name": "FCC Certification",
+      "certifyingBody": "Federal Communications Commission",
+      "certificateNumber": "BCG-E3104A",
+      "issueDate": "2024-09-01"
+    }
+  ],
+  "dimensions": {
+    "length": 16.0,
+    "width": 7.69,
+    "height": 0.83,
+    "weight": 221,
+    "unit": "cm",
+    "weightUnit": "g"
+  },
+  "attributes": {
+    "color": "Natural Titanium",
+    "condition": "Brand New",
+    "packageContents": "iPhone, USB-C Cable, Documentation"
+  }
+}
+

@@ -1,0 +1,10 @@
+{
+  "network": "sepolia",
+  "deployer": "0x4125ddf0B51073B994ECc790e22D01749Ce73bCa",
+  "timestamp": "2025-11-01T09:53:13.692Z",
+  "contracts": {
+    "ParticipantRegistry": "0xB882B408727c752bEb54D7CA91750f2BDe38AAa0",
+    "ProductNFT": "0x7003CBbB7f84C3147f244bDB50CF1193A2cEAc59",
+    "SupplyChain": "0x64c647e4c3cA34C421b446F01EC5B7Cdd7ceDecF"
+  }
+}

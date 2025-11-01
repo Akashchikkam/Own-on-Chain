@@ -1,0 +1,53 @@
+{
+  "name": "Adobe Creative Cloud All Apps",
+  "description": "Complete suite of Adobe creative applications including Photoshop, Illustrator, Premiere Pro, and more",
+  "productType": "digital",
+  "category": "Software",
+  "manufacturer": {
+    "name": "Adobe Inc.",
+    "address": "345 Park Avenue, San Jose, CA 95110",
+    "country": "USA",
+    "website": "https://www.adobe.com"
+  },
+  "serialNumber": "ACC-2024-PRO-98765",
+  "model": "Creative Cloud 2024",
+  "manufactureDate": "2024-10-01T00:00:00Z",
+  "warrantyPeriod": 365,
+  "warrantyDetails": "Annual subscription includes updates, cloud storage, and customer support",
+  "specifications": {
+    "includedApps": "20+ desktop and mobile apps",
+    "cloudStorage": "100GB",
+    "fonts": "Adobe Fonts library access",
+    "updates": "Regular feature updates included"
+  },
+  "images": [
+    {
+      "url": "ipfs://QmExampleSoftwareImage",
+      "type": "main",
+      "description": "Creative Cloud suite overview"
+    }
+  ],
+  "documents": [
+    {
+      "name": "License Agreement",
+      "url": "ipfs://QmExampleLicense",
+      "type": "other"
+    }
+  ],
+  "digitalDetails": {
+    "version": "2024.1",
+    "licenseType": "subscription",
+    "platforms": [
+      "Windows 10/11",
+      "macOS 12+",
+      "iOS",
+      "Android"
+    ]
+  },
+  "attributes": {
+    "subscription": "Annual",
+    "commercialUse": "Allowed",
+    "seats": "1"
+  }
+}
+
