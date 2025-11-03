@@ -169,10 +169,81 @@ export const productNFTService = {
     return await contract.getProductInfo(tokenId);
   },
 
-  // Get transfer history
+  // Get transfer history (from SupplyChain recorded transfers + ERC721 Transfer events)
   async getTransferHistory(provider, tokenId) {
     const contract = await getProductNFTContract(provider);
-    return await contract.getTransferHistory(tokenId);
+    
+    // Get recorded transfers from SupplyChain
+    let recordedTransfers = [];
+    try {
+      recordedTransfers = await contract.getTransferHistory(tokenId);
+      console.log('📋 Recorded transfers from SupplyChain:', recordedTransfers.length);
+    } catch (err) {
+      console.warn('⚠️ Could not get recorded transfers:', err);
+    }
+    
+    // Also get ERC721 Transfer events (catches all transfers, including direct ones)
+    let events = [];
+    try {
+      // Transfer event signature: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+      const filter = contract.filters.Transfer(null, null, tokenId);
+      events = await contract.queryFilter(filter);
+      console.log('📋 ERC721 Transfer events found:', events.length);
+    } catch (err) {
+      console.warn('⚠️ Could not query Transfer events:', err);
+    }
+    
+    // Combine both sources, avoiding duplicates
+    const transferMap = new Map();
+    
+    // Add recorded transfers first
+    for (const transfer of recordedTransfers) {
+      const key = `${transfer.from.toLowerCase()}-${transfer.to.toLowerCase()}-${transfer.timestamp.toString()}`;
+      transferMap.set(key, {
+        from: transfer.from,
+        to: transfer.to,
+        timestamp: transfer.timestamp,
+        transferType: transfer.transferType || 'transfer'
+      });
+    }
+    
+    // Add ERC721 Transfer events (these catch direct transfers)
+    for (const event of events) {
+      try {
+        const from = event.args.from;
+        const to = event.args.to;
+        const tokenIdFromEvent = event.args.tokenId;
+        
+        // Only process if it's for this token
+        if (tokenIdFromEvent && tokenIdFromEvent.toString() === tokenId.toString()) {
+          const block = await event.getBlock();
+          const timestamp = block.timestamp;
+          const key = `${from.toLowerCase()}-${to.toLowerCase()}-${timestamp.toString()}`;
+          
+          // Only add if not already in recorded transfers
+          if (!transferMap.has(key)) {
+            transferMap.set(key, {
+              from: from,
+              to: to,
+              timestamp: timestamp,
+              transferType: 'transfer',
+              transactionHash: event.transactionHash
+            });
+          }
+        }
+      } catch (eventErr) {
+        console.warn('⚠️ Error processing transfer event:', eventErr);
+      }
+    }
+    
+    // Sort by timestamp
+    const allTransfers = Array.from(transferMap.values()).sort((a, b) => 
+      Number(a.timestamp) - Number(b.timestamp)
+    );
+    
+    console.log('📋 Combined transfer history (total):', allTransfers.length);
+    
+    return allTransfers;
   },
 
   // Get tokens owned by address

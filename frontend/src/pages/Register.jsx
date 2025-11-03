@@ -5,11 +5,23 @@ import { participantRegistryService } from '../utils/contractHelpers';
 import { uploadVerificationDocument } from '../utils/ipfs';
 import './Register.css';
 
+// Backend API URL
+const BACKEND_API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001/api';
+
 function Register() {
   const { signer, account, isConnected, provider } = useWeb3();
   const [role, setRole] = useState(Role.BUYER);
+  
+  // Country selection
+  const [country, setCountry] = useState('');
+  const [countries, setCountries] = useState([]);
+  const [detectingCountry, setDetectingCountry] = useState(true);
+  
+  // Government ID
   const [documentType, setDocumentType] = useState('');
+  const [documentTypes, setDocumentTypes] = useState([]);
   const [documentNumber, setDocumentNumber] = useState('');
+  
   const [holderName, setHolderName] = useState('');
   const [holderAddress, setHolderAddress] = useState('');
   const [loading, setLoading] = useState(false);
@@ -17,6 +29,19 @@ function Register() {
   const [error, setError] = useState('');
   const [checkingRegistration, setCheckingRegistration] = useState(false);
   const [existingRegistration, setExistingRegistration] = useState(null);
+
+  // Fetch country list on component mount
+  useEffect(() => {
+    fetchCountries();
+    detectCountry();
+  }, []);
+
+  // Update document types when country changes
+  useEffect(() => {
+    if (country) {
+      fetchGovernmentIdTypes(country);
+    }
+  }, [country]);
 
   // Check if user is already registered when component loads or account changes
   useEffect(() => {
@@ -35,6 +60,54 @@ function Register() {
     
     return () => clearTimeout(timer);
   }, [isConnected, account, provider]);
+
+  const fetchCountries = async () => {
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/country/list`);
+      const data = await response.json();
+      setCountries(data.countries || []);
+    } catch (err) {
+      console.error('Error fetching countries:', err);
+      // Fallback to basic list
+      setCountries([
+        { code: 'IND', name: 'India', flag: '🇮🇳' },
+        { code: 'USA', name: 'United States', flag: '🇺🇸' },
+        { code: 'GBR', name: 'United Kingdom', flag: '🇬🇧' },
+        { code: 'OTHER', name: 'Other', flag: '🌍' }
+      ]);
+    }
+  };
+
+  const detectCountry = async () => {
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/country/detect`);
+      const data = await response.json();
+      if (data.country) {
+        setCountry(data.country);
+        console.log('Auto-detected country:', data.country, data.name);
+      }
+    } catch (err) {
+      console.error('Error detecting country:', err);
+      // Default to India if detection fails
+      setCountry('IND');
+    } finally {
+      setDetectingCountry(false);
+    }
+  };
+
+  const fetchGovernmentIdTypes = async (countryCode) => {
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/country/government-ids/${countryCode}`);
+      const data = await response.json();
+      setDocumentTypes(data.governmentIds || []);
+      // Reset document type when country changes
+      setDocumentType('');
+      setDocumentNumber('');
+    } catch (err) {
+      console.error('Error fetching government ID types:', err);
+      setDocumentTypes([]);
+    }
+  };
 
   const checkExistingRegistration = async () => {
     if (!provider || !account) {
@@ -116,6 +189,7 @@ function Register() {
     try {
       // Upload verification document to IPFS
       const documentData = {
+        country,
         documentType,
         documentNumber,
         holderName,
@@ -123,6 +197,7 @@ function Register() {
         issuer: 'Self-submitted',
         issueDate: new Date().toISOString(),
         walletAddress: account,
+        governmentIdHash: null // Will be set after verification
       };
 
       const ipfsResult = await uploadVerificationDocument(documentData);
@@ -251,6 +326,27 @@ function Register() {
 
         <form onSubmit={handleSubmit} className="register-form card">
           <div className="input-group">
+            <label htmlFor="country">Country *</label>
+            <select
+              id="country"
+              value={country}
+              onChange={(e) => setCountry(e.target.value)}
+              required
+              disabled={detectingCountry}
+            >
+              <option value="">{detectingCountry ? 'Detecting...' : 'Select country'}</option>
+              {countries.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.flag} {c.name}
+                </option>
+              ))}
+            </select>
+            <small>
+              {detectingCountry ? 'Auto-detecting your country...' : 'Select your country of operation'}
+            </small>
+          </div>
+
+          <div className="input-group">
             <label htmlFor="role">Select Role *</label>
             <select
               id="role"
@@ -267,20 +363,29 @@ function Register() {
           </div>
 
           <div className="input-group">
-            <label htmlFor="documentType">Verification Document Type *</label>
+            <label htmlFor="documentType">Government ID Type *</label>
             <select
               id="documentType"
               value={documentType}
               onChange={(e) => setDocumentType(e.target.value)}
               required
+              disabled={!country}
             >
-              <option value="">Select document type</option>
-              <option value="GST">GST Certificate (for businesses)</option>
-              <option value="Aadhar">Aadhar Card (for individuals)</option>
-              <option value="Business License">Business License</option>
-              <option value="PAN">PAN Card</option>
-              <option value="Other">Other Government ID</option>
+              <option value="">
+                {!country ? 'Select country first' : 'Select ID type'}
+              </option>
+              {documentTypes.map((type) => (
+                <option key={type.value} value={type.value}>
+                  {type.label}
+                  {type.forBusinessOnly ? ' (Business only)' : ''}
+                </option>
+              ))}
             </select>
+            {documentTypes.find(t => t.value === documentType) && (
+              <small>
+                Format: {documentTypes.find(t => t.value === documentType).format}
+              </small>
+            )}
           </div>
 
           <div className="input-group">
@@ -320,9 +425,13 @@ function Register() {
           </div>
 
           <div className="alert alert-warning">
-            <strong>Note:</strong> Your verification documents will be stored on IPFS and
-            reviewed by an admin. This is a temporary verification process. In future updates,
-            we will implement more decentralized verification methods.
+            <strong>Note:</strong> Your government ID will be verified based on your country's standards.
+            {documentTypes.find(t => t.value === documentType)?.verificationMethod === 'Manual' ? (
+              <> Your documents will be reviewed by an admin.</>
+            ) : (
+              <> Some countries support automatic verification via government APIs.</>
+            )}
+            {' '}All data is securely stored on IPFS.
           </div>
 
           <button 

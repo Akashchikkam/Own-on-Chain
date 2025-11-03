@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useWeb3 } from '../context/Web3Context';
-import { supplyChainService, productNFTService, formatAddress } from '../utils/contractHelpers';
+import { supplyChainService, productNFTService, formatAddress, participantRegistryService } from '../utils/contractHelpers';
 import { retrieveFromIPFS, ipfsToGatewayUrl } from '../utils/ipfs';
 import { ProductStatusName } from '../contracts/config';
 import './ProductDetails.css';
@@ -16,6 +16,7 @@ function ProductDetails() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [transferLoading, setTransferLoading] = useState(false);
+  const [participantNames, setParticipantNames] = useState({}); // Cache participant company names
 
   useEffect(() => {
     if (isConnected && tokenId) {
@@ -34,6 +35,17 @@ function ProductDetails() {
       const isAuthentic = await supplyChainService.verifyAuthenticity(provider, tokenId);
       const owner = await productNFTService.ownerOf(provider, tokenId);
       const history = await productNFTService.getTransferHistory(provider, tokenId);
+      
+      console.log('📋 Transfer History for Token', tokenId, ':', history);
+      console.log('📋 History length:', history.length);
+      history.forEach((transfer, idx) => {
+        console.log(`  Transfer ${idx + 1}:`, {
+          from: transfer.from,
+          to: transfer.to,
+          timestamp: transfer.timestamp?.toString(),
+          type: transfer.transferType
+        });
+      });
       
       setProduct({
         ...productData,
@@ -58,6 +70,42 @@ function ProductDetails() {
       } catch (metaErr) {
         console.error('Error loading metadata:', metaErr);
       }
+
+      // Load participant company names
+      const names = {};
+      const addressesToFetch = new Set();
+      
+      // Add producer
+      if (productData.producer) addressesToFetch.add(productData.producer.toLowerCase());
+      // Add addresses from transfer history
+      history.forEach(record => {
+        if (record.from && record.from !== '0x0000000000000000000000000000000000000000') {
+          addressesToFetch.add(record.from.toLowerCase());
+        }
+        if (record.to) addressesToFetch.add(record.to.toLowerCase());
+      });
+      
+      // Fetch participant info and company names
+      for (const address of addressesToFetch) {
+        try {
+          const participant = await participantRegistryService.getParticipant(provider, address);
+          if (participant.verificationDocument) {
+            try {
+              const docResult = await retrieveFromIPFS(participant.verificationDocument);
+              if (docResult.success && docResult.data.holderName) {
+                names[address] = docResult.data.holderName;
+              }
+            } catch (docErr) {
+              console.warn(`Could not load document for ${address}:`, docErr);
+            }
+          }
+        } catch (partErr) {
+          // Participant not found or not registered - that's okay
+          console.log(`Participant not registered: ${address}`);
+        }
+      }
+      
+      setParticipantNames(names);
     } catch (err) {
       console.error('Error loading product details:', err);
       setError('Failed to load product details');
@@ -96,6 +144,7 @@ function ProductDetails() {
       setTransferLoading(false);
     }
   };
+
 
   if (!isConnected) {
     return (
@@ -244,24 +293,83 @@ function ProductDetails() {
             )}
           </div>
 
-          <h2 style={{ marginTop: '2rem' }}>Transfer History</h2>
-          <div className="history-timeline">
-            {transferHistory.map((record, index) => (
-              <div key={index} className="history-item">
-                <div className="history-marker"></div>
-                <div className="history-content">
-                  <p className="history-type"><strong>{record.transferType}</strong></p>
-                  <p>From: {formatAddress(record.from)}</p>
-                  <p>To: {formatAddress(record.to)}</p>
-                  <p className="history-date">
-                    {new Date(Number(record.timestamp) * 1000).toLocaleString()}
-                  </p>
+          {/* Manufactured By Section */}
+          {transferHistory.length > 0 && (() => {
+            const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+            const manufactureRecord = transferHistory.find(r => r.from.toLowerCase() === ZERO_ADDRESS.toLowerCase());
+            const manufacturerAddress = manufactureRecord?.to?.toLowerCase();
+            const companyName = manufacturerAddress ? participantNames[manufacturerAddress] : null;
+            
+            return manufactureRecord ? (
+              <div style={{ marginTop: '2rem' }}>
+                <h2>Manufactured By</h2>
+                <div className="info-section">
+                  {companyName ? (
+                    <p><strong>{companyName}</strong> ({formatAddress(manufactureRecord.to)})</p>
+                  ) : (
+                    <p><strong>{formatAddress(manufactureRecord.to)}</strong></p>
+                  )}
                 </div>
               </div>
-            ))}
-          </div>
+            ) : null;
+          })()}
+
+          {/* Ownership Transfer History */}
+          {(() => {
+            const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+            const actualTransfers = transferHistory.filter(r => 
+              r.from && 
+              r.from.toLowerCase() !== ZERO_ADDRESS.toLowerCase() &&
+              r.to
+            );
+            
+            console.log('📋 Filtered actual transfers (excluding manufacture):', actualTransfers.length);
+            
+            return actualTransfers.length > 0 ? (
+              <div style={{ marginTop: '2rem' }}>
+                <h2>Ownership Transfer</h2>
+                <div className="history-timeline">
+                  {actualTransfers.map((record, index) => {
+                    const fromAddress = record.from?.toLowerCase();
+                    const toAddress = record.to?.toLowerCase();
+                    const fromCompanyName = fromAddress ? participantNames[fromAddress] : null;
+                    const toCompanyName = toAddress ? participantNames[toAddress] : null;
+                    
+                    return (
+                      <div key={index} className="history-item">
+                        <div className="history-marker"></div>
+                        <div className="history-content">
+                          <p className="history-type">
+                            <strong>Transfer #{index + 1}</strong>
+                          </p>
+                          <p>
+                            <strong>From:</strong> {fromCompanyName ? (
+                              <><strong>{fromCompanyName}</strong> ({formatAddress(record.from)})</>
+                            ) : (
+                              <strong>{formatAddress(record.from)}</strong>
+                            )}
+                          </p>
+                          <p>
+                            <strong>To:</strong> {toCompanyName ? (
+                              <><strong>{toCompanyName}</strong> ({formatAddress(record.to)})</>
+                            ) : (
+                              <strong>{formatAddress(record.to)}</strong>
+                            )}
+                          </p>
+                          <p className="history-date">
+                            {new Date(Number(record.timestamp) * 1000).toLocaleString()}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null;
+          })()}
         </div>
       </div>
+
     </div>
   );
 }

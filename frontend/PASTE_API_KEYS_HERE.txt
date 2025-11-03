@@ -1,0 +1,32 @@
+🔴 COPY THIS ENTIRE FILE CONTENT TO: frontend/.env
+
+===== START COPYING FROM BELOW THIS LINE ======
+=
+# Backend API
+VITE_BACKEND_URL=http://localhost:3001/api
+
+# Blockchain Network (Sepolia Testnet)
+VITE_NETWORK_NAME=sepolia
+VITE_CHAIN_ID=11155111
+
+# IPFS / Pinata (REQUIRED!)
+# Get free keys at: https://app.pinata.cloud/
+VITE_PINATA_API_KEY=paste_your_pinata_api_key_here
+VITE_PINATA_SECRET_KEY=paste_your_pinata_secret_key_here
+
+====== END COPYING ABOVE THIS LINE ======
+
+
+📝 INSTRUCTIONS:
+1. Open your file explorer
+2. Navigate to: /Users/c.v.akash/Own-on-Chain/frontend/
+3. Create a new file named: .env (exactly this, with the dot at the start)
+4. Copy the content between the "START COPYING" and "END COPYING" lines
+5. Paste into the .env file
+6. Replace "paste_your_pinata_api_key_here" with your actual Pinata API Key
+7. Replace "paste_your_pinata_secret_key_here" with your actual Pinata Secret Key
+8. Save the file
+9. Restart the frontend server
+
+✅ Done!
+

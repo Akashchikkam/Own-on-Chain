@@ -8,13 +8,24 @@ const PINATA_GATEWAY = 'https://gateway.pinata.cloud/ipfs/';
 // Check if we're in local development mode without API keys
 const isLocalMockMode = !PINATA_API_KEY || !PINATA_SECRET_KEY;
 
-// In-memory storage for local testing
-const localIPFSStorage = new Map();
+// Persistent storage for local testing (survives page refresh)
+const localIPFSStorage = {
+  get: (key) => {
+    const item = localStorage.getItem(`ipfs_${key}`);
+    return item ? JSON.parse(item) : null;
+  },
+  set: (key, value) => {
+    localStorage.setItem(`ipfs_${key}`, JSON.stringify(value));
+  },
+  has: (key) => {
+    return localStorage.getItem(`ipfs_${key}`) !== null;
+  }
+};
 
 // Log mode on initialization
 if (isLocalMockMode) {
   console.log('🚀 IPFS Local Mock Mode Enabled - No API keys needed for testing');
-  console.log('💡 Images and metadata will be stored in browser memory');
+  console.log('💡 Images and metadata will be stored in browser localStorage (persists on refresh)');
   console.log('ℹ️  To use real IPFS, add VITE_PINATA_API_KEY and VITE_PINATA_SECRET_KEY to .env');
 } else {
   console.log('✅ IPFS Connected to Pinata');
@@ -152,29 +163,58 @@ export async function retrieveFromIPFS(ipfsHash) {
   const hash = ipfsHash.replace('ipfs://', '');
   
   // Local mock mode - retrieve from local storage
-  if (isLocalMockMode && localIPFSStorage.has(hash)) {
-    console.log('📦 Local Mode: Retrieving from mock storage');
-    return {
-      success: true,
-      data: localIPFSStorage.get(hash)
-    };
+  if (isLocalMockMode) {
+    if (localIPFSStorage.has(hash)) {
+      console.log('✅ Found in localStorage:', hash);
+      return {
+        success: true,
+        data: localIPFSStorage.get(hash)
+      };
+    } else {
+      console.warn('❌ NOT found in localStorage:', hash);
+      console.log('💡 Available keys:', Object.keys(localStorage).filter(k => k.startsWith('ipfs_')));
+      return {
+        success: false,
+        error: 'Metadata not found in localStorage. This product was created before the persistence fix. Please recreate the product.'
+      };
+    }
   }
 
-  // Real IPFS retrieval
-  try {
-    const response = await axios.get(`${PINATA_GATEWAY}${hash}`);
-    
-    return {
-      success: true,
-      data: response.data
-    };
-  } catch (error) {
-    console.error('Error retrieving from IPFS:', error);
-    return {
-      success: false,
-      error: error.message
-    };
+  // Real IPFS retrieval with multiple gateway fallbacks
+  const gateways = [
+    PINATA_GATEWAY, // Primary: Pinata gateway
+    `https://ipfs.io/ipfs/${hash}`, // Public IPFS gateway
+    `https://gateway.pinata.cloud/ipfs/${hash}`, // Alternative Pinata
+    `https://cloudflare-ipfs.com/ipfs/${hash}`, // Cloudflare gateway
+    `https://dweb.link/ipfs/${hash}` // Protocol Labs gateway
+  ];
+
+  for (const gateway of gateways) {
+    try {
+      console.log(`🔍 Trying IPFS gateway: ${gateway}`);
+      const response = await axios.get(gateway, {
+        timeout: 5000, // 5 second timeout per gateway
+        validateStatus: (status) => status === 200
+      });
+      
+      console.log(`✅ Successfully retrieved from: ${gateway}`);
+      return {
+        success: true,
+        data: response.data
+      };
+    } catch (error) {
+      console.warn(`⚠️ Gateway failed (${gateway}):`, error.message);
+      // Try next gateway
+      continue;
+    }
   }
+
+  // All gateways failed
+  console.error('❌ All IPFS gateways failed for hash:', hash);
+  return {
+    success: false,
+    error: 'Failed to retrieve from all IPFS gateways'
+  };
 }
 
 /**
@@ -271,5 +311,44 @@ export async function uploadVerificationDocument(documentData) {
  */
 export function isInMockMode() {
   return isLocalMockMode;
+}
+
+/**
+ * Delete metadata from IPFS (unpin from Pinata or remove from localStorage)
+ */
+export async function deleteFromIPFS(ipfsHash) {
+  const hash = ipfsHash.replace('ipfs://', '');
+  
+  // Local mock mode - remove from localStorage
+  if (isLocalMockMode) {
+    if (localIPFSStorage.has(hash)) {
+      localStorage.removeItem(`ipfs_${hash}`);
+      console.log('🗑️ Removed from localStorage:', hash);
+      return { success: true };
+    }
+    return { success: false, error: 'Hash not found in localStorage' };
+  }
+
+  // Real Pinata - unpin the file
+  try {
+    await axios.delete(
+      `${PINATA_BASE_URL}/pinning/unpin/${hash}`,
+      {
+        headers: {
+          'pinata_api_key': PINATA_API_KEY,
+          'pinata_secret_api_key': PINATA_SECRET_KEY
+        }
+      }
+    );
+    
+    console.log('🗑️ Unpinned from Pinata:', hash);
+    return { success: true };
+  } catch (error) {
+    console.error('Error unpinning from Pinata:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }
 

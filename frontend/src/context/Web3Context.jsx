@@ -58,7 +58,7 @@ export const Web3Provider = ({ children }) => {
           symbol: 'ETH',
           decimals: 18,
         },
-        rpcUrls: ['https://rpc.sepolia.org'],
+        rpcUrls: ['https://rpc.ankr.com/eth_sepolia'], // CORS-friendly
         blockExplorerUrls: ['https://sepolia.etherscan.io/'],
       };
     }
