@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useWeb3 } from '../context/Web3Context';
 import { supplyChainService, productNFTService } from '../utils/contractHelpers';
 import { uploadProductMetadata, uploadFileToIPFS, retrieveFromIPFS, ipfsToGatewayUrl, deleteFromIPFS } from '../utils/ipfs';
 import { downloadProductQR } from '../utils/qr-generator';
 import { useNavigate } from 'react-router-dom';
 import Scanner from '../components/Scanner';
+import SecureSendModal from '../components/SecureSendModal';
+import SecureReceiveModal from '../components/SecureReceiveModal';
+import BatchTransferModal from '../components/BatchTransferModal';
 import './Dashboard.css';
 
 function ProducerDashboard() {
@@ -17,6 +20,16 @@ function ProducerDashboard() {
   // Scanner state
   const [showScanner, setShowScanner] = useState(false);
   const [scannedProduct, setScannedProduct] = useState(null);
+  const [scanMode, setScanMode] = useState(null); // 'send' or 'receive'
+  const [showSendModal, setShowSendModal] = useState(false);
+  const [showReceiveModal, setShowReceiveModal] = useState(false);
+  
+  // Batch scanning state
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchProducts, setBatchProducts] = useState([]);
+  const scannedTokenIdsRef = useRef(new Set()); // Use ref for synchronous duplicate checking
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState(null); // For showing product name after scan
 
   // Form state
   const [formData, setFormData] = useState({
@@ -44,6 +57,10 @@ function ProducerDashboard() {
 
   const [roleError, setRoleError] = useState('');
   const [checkingRole, setCheckingRole] = useState(false);
+  
+  // General product selection state
+  const [selectedProducts, setSelectedProducts] = useState(new Set());
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
 
   useEffect(() => {
     if (isConnected && account && provider) {
@@ -139,7 +156,21 @@ function ProducerDashboard() {
       const productsData = await Promise.all(
         tokenIds.map(async (tokenId) => {
           const info = await productNFTService.getProductInfo(provider, tokenId);
-          const product = await supplyChainService.getProduct(provider, tokenId);
+          
+          // Try to get product from SupplyChain, but handle gracefully if it doesn't exist
+          let product = null;
+          try {
+            product = await supplyChainService.getProduct(provider, tokenId);
+            console.log(`  ✅ Token ${tokenId} found in SupplyChain`);
+          } catch (supplyChainErr) {
+            // Product might not be registered in SupplyChain yet (e.g., just created)
+            // This is OK - we'll still show it using NFT data
+            if (supplyChainErr.message && supplyChainErr.message.includes('Product does not exist')) {
+              console.warn(`  ⚠️ Token ${tokenId} not registered in SupplyChain (may be newly created)`);
+            } else {
+              console.error(`  ❌ Error loading product ${tokenId} from SupplyChain:`, supplyChainErr);
+            }
+          }
           
           // Load metadata to get images, description, model, category, etc.
           let metadata = null;
@@ -188,8 +219,12 @@ function ProducerDashboard() {
           return {
             tokenId: Number(tokenId),
             ...info,
-            ...product,
-            metadata
+            ...(product || {}), // Spread product data if available, otherwise empty object
+            // If product is null, get owner from NFT info
+            currentOwner: product?.currentOwner || info?.owner || currentAccount,
+            metadata,
+            // Flag to indicate if product exists in SupplyChain (needed for batch transfers)
+            existsInSupplyChain: !!product && product.tokenId !== undefined && product.tokenId !== null
           };
         })
       );
@@ -262,102 +297,248 @@ function ProducerDashboard() {
 
   const handleTransfer = async (tokenId, e) => {
     e.stopPropagation(); // Prevent card click
-    const recipientAddress = prompt('Enter recipient wallet address:');
-    if (!recipientAddress) return;
-
-    // Validate address format
-    if (!recipientAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
-      setError('Invalid address format. Please enter a valid Ethereum address.');
+    
+    // Find the product in the products array
+    const product = products.find(p => p.tokenId === tokenId);
+    if (!product) {
+      setError('Product not found');
       return;
     }
 
-    // Show info about MetaMask transaction BEFORE sending
-    // MetaMask will show SupplyChain contract address, not recipient address
-    const { CONTRACT_ADDRESSES } = await import('../contracts/config');
-    const addresses = await CONTRACT_ADDRESSES;
-    const supplyChainAddress = addresses.SupplyChain;
-    
-    const proceed = window.confirm(
-      `⚠️ IMPORTANT: MetaMask will show the SupplyChain contract address (${supplyChainAddress.substring(0, 10)}...), NOT the recipient address.\n\n` +
-      `This is NORMAL! The transaction goes TO the contract, which then transfers TO your recipient:\n` +
-      `${recipientAddress.substring(0, 10)}...${recipientAddress.substring(recipientAddress.length - 8)}\n\n` +
-      `Click OK to continue with the transfer.`
-    );
-    
-    if (!proceed) return;
+    // Load full product details (owner, metadata) if not already loaded
+    try {
+      setLoading(true);
+      const owner = await productNFTService.ownerOf(provider, tokenId);
+      const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
+      
+      let metadata = product.metadata;
+      if (!metadata && tokenURI && tokenURI !== '') {
+        const result = await retrieveFromIPFS(tokenURI);
+        if (result) {
+          metadata = result;
+          if (metadata.images && metadata.images.length > 0) {
+            metadata.images = metadata.images.map(img => ({
+              ...img,
+              url: ipfsToGatewayUrl(img.url || img.ipfsUrl)
+            }));
+          }
+        }
+      }
+
+      const transferProduct = {
+        tokenId,
+        owner,
+        metadata: metadata || product.metadata
+      };
+
+      setScannedProduct(transferProduct);
+      setShowSendModal(true);
+    } catch (err) {
+      console.error('Error loading product for transfer:', err);
+      setError('Failed to load product details for transfer');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDownloadQRSheet = async () => {
+    // Get selected products
+    const productsToDownload = products.filter(p => selectedProducts.has(p.tokenId.toString()));
+
+    if (productsToDownload.length === 0) {
+      setError('Please select at least one product to download QR sheet.');
+      setTimeout(() => setError(''), 5000);
+      return;
+    }
 
     try {
-      setTransferLoading(tokenId);
+      setLoading(true);
       setError('');
-      setSuccess('');
-
-      // Validate recipient is registered and verified (maintains supply chain integrity)
-      // But allow flexible transfers - anyone can send to anyone (decentralized Web3 freedom)
-      const { participantRegistryService } = await import('../utils/contractHelpers');
-      const { Role } = await import('../contracts/config');
       
-      let recipientParticipant;
+      // Extract token IDs and product info from selected products
+      const tokenIds = productsToDownload.map(p => p.tokenId);
+      const productData = productsToDownload.map(p => ({
+        tokenId: p.tokenId,
+        name: p.metadata?.name || `Product #${p.tokenId}`,
+        serialNumber: p.metadata?.serialNumber || null,
+        model: p.metadata?.model || null,
+        productId: p.metadata?.productId || null
+      }));
+      const baseUrl = window.location.origin;
+
+      // Call backend to generate PDF
+      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+      // Ensure backendUrl doesn't end with /api (we'll add it)
+      const baseBackendUrl = backendUrl.replace(/\/api$/, '');
+      
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute timeout
+      
       try {
-        recipientParticipant = await participantRegistryService.getParticipant(provider, recipientAddress);
-      } catch (err) {
-        throw new Error('Recipient is not registered. Only registered and verified participants can receive products.');
-      }
+        const response = await fetch(`${baseBackendUrl}/api/qr-sheet/generate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            tokenIds,
+            productData, // Send product metadata directly
+            baseUrl
+          }),
+          signal: controller.signal
+        });
 
-      const recipientRole = Number(recipientParticipant.role);
-      const recipientStatus = Number(recipientParticipant.status);
+        clearTimeout(timeoutId);
 
-      // Require verification
-      if (recipientStatus !== 1) {
-        throw new Error('Recipient is not verified. Only verified participants can receive products. Please wait for admin verification.');
-      }
-
-      // Log transfer details for debugging
-      console.log('📋 Transfer Details:');
-      console.log('  Transaction TO: SupplyChain Contract:', supplyChainAddress);
-      console.log('  Will transfer TO: Recipient:', recipientAddress);
-      console.log('  ⚠️ MetaMask shows contract address (this is normal for smart contract calls)');
-
-      // Use appropriate SupplyChain method based on recipient role
-      // All transfers are tracked on-chain (decentralized blockchain, not centralized)
-      try {
-        if (recipientRole === Role.DISTRIBUTOR) {
-          await supplyChainService.transferToDistributor(signer, tokenId, recipientAddress);
-          setSuccess(`Product #${tokenId} transferred to Distributor (${recipientAddress.substring(0, 10)}...) successfully! The transaction shows SupplyChain contract address in MetaMask - this is normal.`);
-        } else if (recipientRole === Role.RETAILER) {
-          await supplyChainService.transferToRetailer(signer, tokenId, recipientAddress);
-          setSuccess(`Product #${tokenId} transferred to Retailer (${recipientAddress.substring(0, 10)}...) successfully! The transaction shows SupplyChain contract address in MetaMask - this is normal.`);
-        } else if (recipientRole === Role.BUYER) {
-          // sellToBuyer accepts any verified participant, so flexible
-          const saleDetails = prompt('Enter sale details (IPFS hash or description):') || '';
-          await supplyChainService.sellToBuyer(signer, tokenId, recipientAddress, saleDetails);
-          setSuccess(`Product #${tokenId} transferred successfully! The transaction shows SupplyChain contract address in MetaMask - this is normal.`);
-        } else if (recipientRole === Role.PRODUCER) {
-          // Allow transfer back to Producer if needed (flexible flow)
-          // Use sellToBuyer which accepts any verified participant
-          const saleDetails = prompt('Enter transfer details (IPFS hash or description):') || '';
-          await supplyChainService.sellToBuyer(signer, tokenId, recipientAddress, saleDetails);
-          setSuccess(`Product #${tokenId} transferred successfully! The transaction shows SupplyChain contract address in MetaMask - this is normal.`);
-        } else {
-          // Unknown role but verified - use sellToBuyer which accepts any verified participant
-          const saleDetails = prompt('Enter transfer details (IPFS hash or description):') || '';
-          await supplyChainService.sellToBuyer(signer, tokenId, recipientAddress, saleDetails);
-          setSuccess(`Product #${tokenId} transferred successfully! The transaction shows SupplyChain contract address in MetaMask - this is normal.`);
+        if (!response.ok) {
+          // Try to parse error response
+          let errorMessage = 'Failed to generate QR sheet PDF';
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorMessage;
+          } catch (e) {
+            // If response is not JSON, use status text
+            errorMessage = `Server error: ${response.status} ${response.statusText}`;
+          }
+          throw new Error(errorMessage);
         }
-      } catch (supplyChainErr) {
-        // If SupplyChain method fails due to status constraints, 
-        // still track on blockchain via direct NFT transfer (maintains decentralized tracking)
-        console.warn('SupplyChain method failed, using direct NFT transfer (still tracked on blockchain):', supplyChainErr);
-        await productNFTService.transferTo(signer, tokenId, recipientAddress);
-        setSuccess(`Product #${tokenId} transferred successfully! (Tracked on blockchain)`);
-      }
 
+        // Check if response is actually a PDF
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/pdf')) {
+          // Might be an error JSON response
+          try {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Server returned non-PDF response');
+          } catch (e) {
+            throw new Error('Server returned invalid response format');
+          }
+        }
+
+        // Get PDF blob and download
+        const blob = await response.blob();
+        
+        if (blob.size === 0) {
+          throw new Error('Generated PDF is empty');
+        }
+        
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `qr-sheet-${Date.now()}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+
+        setSuccess(`QR Sheet PDF generated successfully with ${productsToDownload.length} product${productsToDownload.length > 1 ? 's' : ''}!`);
+        setTimeout(() => setSuccess(''), 3000);
+        
+        // Clear selection after successful download
+        setSelectedProducts(new Set());
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Request timed out. Please try again with fewer products.');
+        }
+        throw fetchError;
+      }
+    } catch (err) {
+      console.error('Error generating QR sheet:', err);
+      setError(err.message || 'Failed to generate QR sheet PDF');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleProductSelection = (tokenId, e) => {
+    e.stopPropagation(); // Prevent card click
+    const tokenIdStr = tokenId.toString();
+    setSelectedProducts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(tokenIdStr)) {
+        newSet.delete(tokenIdStr);
+      } else {
+        newSet.add(tokenIdStr);
+      }
+      return newSet;
+    });
+  };
+
+  const handleSelectAllProducts = () => {
+    const allTokenIds = new Set(products.map(p => p.tokenId.toString()));
+    setSelectedProducts(allTokenIds);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedProducts(new Set());
+  };
+
+  const handleCancelSelection = () => {
+    setSelectedProducts(new Set());
+    setIsSelectionMode(false);
+  };
+
+  const handleBatchDelete = async () => {
+    const selectedTokenIds = Array.from(selectedProducts);
+    if (selectedTokenIds.length === 0) {
+      setError('Please select at least one product to delete.');
+      return;
+    }
+
+    if (!window.confirm(`Are you sure you want to delete ${selectedTokenIds.length} product${selectedTokenIds.length > 1 ? 's' : ''}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+      
+      const productsToDelete = products.filter(p => selectedProducts.has(p.tokenId.toString()));
+      
+      for (const product of productsToDelete) {
+        try {
+          await handleDelete(product.tokenId, null);
+        } catch (err) {
+          console.error(`Failed to delete product ${product.tokenId}:`, err);
+        }
+      }
+      
+      setSuccess(`Deleted ${productsToDelete.length} product${productsToDelete.length > 1 ? 's' : ''} successfully!`);
+      setTimeout(() => setSuccess(''), 3000);
+      
+      // Clear selection and exit selection mode
+      setSelectedProducts(new Set());
+      setIsSelectionMode(false);
+      
+      // Reload products
       await loadProducts();
     } catch (err) {
-      console.error('Transfer error:', err);
-      setError(err.message || 'Failed to transfer product');
+      console.error('Error in batch delete:', err);
+      setError('Failed to delete some products. Please try again.');
     } finally {
-      setTransferLoading(null);
+      setLoading(false);
     }
+  };
+
+  const handleBatchSend = () => {
+    const selectedProductsList = products.filter(p => selectedProducts.has(p.tokenId.toString()));
+    if (selectedProductsList.length === 0) {
+      setError('Please select at least one product to send.');
+      return;
+    }
+    
+    setBatchProducts(selectedProductsList);
+    setShowBatchModal(true);
+    setSelectedProducts(new Set());
+    setIsSelectionMode(false);
+  };
+
+  const handleBatchReceive = () => {
+    // For batch receive, we still need to scan QR codes
+    setError('Batch receive requires scanning QR codes. Please use "Scan to Receive" for individual products or scan multiple QR codes.');
+    setTimeout(() => setError(''), 5000);
   };
 
   const handleDownloadQR = async (product, e) => {
@@ -379,13 +560,22 @@ function ProducerDashboard() {
     }
   };
 
-  const handleScanProduct = () => {
+  const handleScanProduct = (mode = 'send', enableBatch = false) => {
+    setScanMode(mode);
+    setBatchMode(enableBatch);
+    setBatchProducts(enableBatch ? [] : []);
+    scannedTokenIdsRef.current.clear(); // Reset scanned token IDs when starting new batch
     setShowScanner(true);
+    setScanFeedback(null);
   };
 
   const handleScanSuccess = async (result) => {
     console.log('Scan result:', result);
-    setShowScanner(false);
+    
+    // In batch mode, don't close scanner
+    if (!batchMode) {
+      setShowScanner(false);
+    }
     
     try {
       let tokenId;
@@ -394,14 +584,51 @@ function ProducerDashboard() {
       if (result.tokenId) {
         tokenId = result.tokenId;
       } else if (result.productId) {
-        // TODO: Query backend to get token ID from product ID
-        setError('Product ID lookup not yet implemented. Please scan QR code with token ID.');
-        return;
+        // Try backend lookup for product ID + serial
+        try {
+          const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+          const baseBackendUrl = backendUrl.replace(/\/api$/, '');
+          const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(result.productId)}/${encodeURIComponent(result.serialNumber || '')}`);
+          
+          if (lookupResponse.ok) {
+            const lookupResult = await lookupResponse.json();
+            if (lookupResult.success && lookupResult.data) {
+              tokenId = lookupResult.data.tokenId;
+            }
+          }
+        } catch (lookupErr) {
+          console.warn('Product ID lookup failed:', lookupErr);
+        }
+        
+        if (!tokenId) {
+          setError('Product ID lookup failed. Please scan QR code with token ID.');
+          return;
+        }
       } else if (result.url) {
         // Parse URL to get token ID
         const urlPath = result.url.pathname;
         if (urlPath.includes('/verify/')) {
           tokenId = urlPath.split('/verify/')[1];
+        } else if (result.url.searchParams) {
+          // Handle /verify?id=xxx&serial=xxx format
+          const productId = result.url.searchParams.get('id');
+          const serial = result.url.searchParams.get('serial');
+          if (productId && serial) {
+            try {
+              const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+              const baseBackendUrl = backendUrl.replace(/\/api$/, '');
+              const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`);
+              
+              if (lookupResponse.ok) {
+                const lookupResult = await lookupResponse.json();
+                if (lookupResult.success && lookupResult.data) {
+                  tokenId = lookupResult.data.tokenId;
+                }
+              }
+            } catch (lookupErr) {
+              console.warn('Product ID lookup failed:', lookupErr);
+            }
+          }
         }
       } else if (result.raw) {
         // Try to parse raw text as URL
@@ -409,6 +636,25 @@ function ProducerDashboard() {
           const url = new URL(result.raw);
           if (url.pathname.includes('/verify/')) {
             tokenId = url.pathname.split('/verify/')[1];
+          } else if (url.searchParams) {
+            const productId = url.searchParams.get('id');
+            const serial = url.searchParams.get('serial');
+            if (productId && serial) {
+              try {
+                const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+                const baseBackendUrl = backendUrl.replace(/\/api$/, '');
+                const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`);
+                
+                if (lookupResponse.ok) {
+                  const lookupResult = await lookupResponse.json();
+                  if (lookupResult.success && lookupResult.data) {
+                    tokenId = lookupResult.data.tokenId;
+                  }
+                }
+              } catch (lookupErr) {
+                console.warn('Product ID lookup failed:', lookupErr);
+              }
+            }
           }
         } catch (e) {
           // Not a URL, might be just token ID
@@ -421,18 +667,88 @@ function ProducerDashboard() {
         return;
       }
       
-      // Fetch product details
+      const tokenIdStr = tokenId.toString();
+      
+      // CRITICAL SECURITY CHECK 1: Check for duplicates IMMEDIATELY (synchronously) using ref
+      // This prevents race conditions and ensures duplicate detection works even with rapid scanning
+      if (batchMode) {
+        if (scannedTokenIdsRef.current.has(tokenIdStr)) {
+          // Try to get product name from existing batch products
+          const existingProduct = batchProducts.find(p => p.tokenId.toString() === tokenIdStr);
+          const existingProductName = existingProduct?.metadata?.name || `Product #${tokenIdStr}`;
+          
+          console.log(`🔒 Duplicate product BLOCKED: Token ID ${tokenIdStr} already in batch`);
+          setScanFeedback({
+            type: 'warning',
+            message: `⚠️ Already added: ${existingProductName}`,
+            productName: existingProductName
+          });
+          setTimeout(() => setScanFeedback(null), 3000);
+          return; // Exit early - don't fetch product data if already added
+        }
+        
+        // Also check against batchProducts array (defensive check)
+        if (batchProducts.some(p => p.tokenId.toString() === tokenIdStr)) {
+          const existingProduct = batchProducts.find(p => p.tokenId.toString() === tokenIdStr);
+          const existingProductName = existingProduct?.metadata?.name || `Product #${tokenIdStr}`;
+          
+          console.log(`🔒 Duplicate product BLOCKED: Token ID ${tokenIdStr} already in batchProducts array`);
+          setScanFeedback({
+            type: 'warning',
+            message: `⚠️ Already added: ${existingProductName}`,
+            productName: existingProductName
+          });
+          setTimeout(() => setScanFeedback(null), 3000);
+          return;
+        }
+        
+        // Mark tokenId as scanned IMMEDIATELY and SYNCHRONOUSLY to prevent duplicates
+        scannedTokenIdsRef.current.add(tokenIdStr);
+      }
+      
+      // CRITICAL SECURITY CHECK 2: Check ownership BEFORE fetching product data
+      // Fetch product details (only owner check first)
       setLoading(true);
-      const owner = await productNFTService.ownerOf(provider, tokenId);
+      let owner;
+      try {
+        owner = await productNFTService.ownerOf(provider, tokenId);
+      } catch (err) {
+        console.error('Error checking ownership:', err);
+        setError(`Failed to verify ownership: ${err.message}`);
+        setLoading(false);
+        // Remove from scanned set if ownership check failed
+        if (batchMode) {
+          scannedTokenIdsRef.current.delete(tokenIdStr);
+        }
+        return;
+      }
+      
+      // CRITICAL SECURITY CHECK 3: Verify user owns the product
+      if (batchMode && account && owner.toLowerCase() !== account.toLowerCase()) {
+        console.log(`🔒 Ownership check FAILED: User ${account} does not own Token ID ${tokenIdStr}`);
+        setScanFeedback({
+          type: 'error',
+          message: `✗ Not owned by you: Product #${tokenIdStr}`,
+          productName: null
+        });
+        setTimeout(() => setScanFeedback(null), 3000);
+        setError(`You do not own Product #${tokenIdStr}. Only products you own can be added to batch.`);
+        setLoading(false);
+        // Remove from scanned set if ownership check failed
+        scannedTokenIdsRef.current.delete(tokenIdStr);
+        return;
+      }
+      
+      // Now fetch full product details (metadata, etc.)
       const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
       
       // Check if product exists and get metadata
       let metadata = null;
       if (tokenURI && tokenURI !== '') {
-        const result = await retrieveFromIPFS(tokenURI);
-        if (result) {
-          metadata = result;
-          if (metadata.images && metadata.images.length > 0) {
+        const ipfsResult = await retrieveFromIPFS(tokenURI);
+        if (ipfsResult) {
+          metadata = ipfsResult.success ? ipfsResult.data : ipfsResult;
+          if (metadata && metadata.images && metadata.images.length > 0) {
             metadata.images = metadata.images.map(img => ({
               ...img,
               url: ipfsToGatewayUrl(img.url || img.ipfsUrl)
@@ -441,19 +757,66 @@ function ProducerDashboard() {
         }
       }
       
-      setScannedProduct({
+      const productData = {
         tokenId,
         owner,
         metadata
-      });
+      };
       
-      setSuccess(`Product #${tokenId} scanned successfully!`);
+      const productName = metadata?.name || `Product #${tokenId}`;
       
+      // Show feedback with product name
+      if (batchMode) {
+        // Final defensive check before adding (should never trigger due to earlier checks)
+        if (scannedTokenIdsRef.current.has(tokenIdStr) && batchProducts.some(p => p.tokenId.toString() === tokenIdStr)) {
+          const existingProduct = batchProducts.find(p => p.tokenId.toString() === tokenIdStr);
+          const existingProductName = existingProduct?.metadata?.name || productName;
+          console.log(`🔒 Final duplicate check triggered: ${tokenIdStr}`);
+          setScanFeedback({
+            type: 'warning',
+            message: `⚠️ Already added: ${existingProductName}`,
+            productName: existingProductName
+          });
+          setTimeout(() => setScanFeedback(null), 3000);
+          setLoading(false);
+          return;
+        }
+        
+        // Add to batch list
+        setBatchProducts(prev => [...prev, productData]);
+        setScanFeedback({
+          type: 'success',
+          message: `✓ Added: ${productName}`,
+          productName
+        });
+        setTimeout(() => setScanFeedback(null), 3000);
+        setSuccess(`Added ${productName} to batch (${batchProducts.length + 1} products)`);
+        setTimeout(() => setSuccess(''), 2000);
+      } else {
+        // Single product mode
+        setScannedProduct(productData);
+        
+        // Based on scan mode, open appropriate modal
+        if (scanMode === 'send') {
+          setShowSendModal(true);
+        } else if (scanMode === 'receive') {
+          setShowReceiveModal(true);
+        } else {
+          setSuccess(`Product ${productName} scanned successfully!`);
+        }
+      }
+      
+      setLoading(false);
     } catch (err) {
       console.error('Error loading scanned product:', err);
-      setError('Failed to load product details. Product may not exist.');
-    } finally {
+      setError(`Failed to load product: ${err.message}`);
       setLoading(false);
+      setScanFeedback({
+        type: 'error',
+        message: `Failed to scan: ${err.message}`,
+        productName: null
+      });
+      setTimeout(() => setScanFeedback(null), 3000);
     }
   };
 
@@ -462,37 +825,20 @@ function ProducerDashboard() {
     setError('Failed to scan. Please try again.');
   };
 
-  const handleTransferScanned = async () => {
-    if (!scannedProduct) return;
-    
-    const recipientAddress = prompt('Enter recipient wallet address:');
-    if (!recipientAddress) return;
-    
-    // Validate address
-    if (!recipientAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
-      setError('Invalid address format.');
-      return;
-    }
-    
-    try {
-      setTransferLoading(scannedProduct.tokenId);
-      
-      await supplyChainService.transfer(
-        signer,
-        scannedProduct.tokenId,
-        recipientAddress
-      );
-      
-      setSuccess(`Product #${scannedProduct.tokenId} transferred successfully!`);
-      setScannedProduct(null);
-      await loadProducts();
-      
-    } catch (err) {
-      console.error('Transfer error:', err);
-      setError(err.message || 'Failed to transfer product');
-    } finally {
-      setTransferLoading(null);
-    }
+  const handleSendSuccess = (message) => {
+    setSuccess(message);
+    setScannedProduct(null);
+    setShowSendModal(false);
+    loadProducts();
+    setTimeout(() => setSuccess(''), 5000);
+  };
+
+  const handleReceiveSuccess = (message) => {
+    setSuccess(message);
+    setScannedProduct(null);
+    setShowReceiveModal(false);
+    loadProducts();
+    setTimeout(() => setSuccess(''), 5000);
   };
 
   const handleDelete = async (tokenId, e) => {
@@ -656,21 +1002,112 @@ function ProducerDashboard() {
     <div className="dashboard">
       <div className="dashboard-header">
         <h1>Producer Dashboard</h1>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
           <button 
             className="btn btn-primary"
             onClick={() => setShowCreateForm(!showCreateForm)}
-            disabled={!!roleError}
+            disabled={!!roleError || loading}
           >
             {showCreateForm ? 'Cancel' : '+ Create Product'}
           </button>
+          
+          {/* Select Mode Toggle */}
+          {!isSelectionMode ? (
+            <button 
+              className="btn"
+              onClick={() => setIsSelectionMode(true)}
+              disabled={products.length === 0 || loading || !!roleError}
+              style={{ backgroundColor: '#2196F3', color: 'white' }}
+              title="Enter selection mode to choose products for batch actions"
+            >
+              ✓ Select Products
+            </button>
+          ) : (
+            <>
+              <button 
+                className="btn"
+                onClick={handleSelectAllProducts}
+                disabled={products.length === 0 || loading || !!roleError}
+                style={{ backgroundColor: '#2196F3', color: 'white', fontSize: '0.9rem' }}
+                title="Select all products"
+              >
+                ✓ Select All
+              </button>
+              {selectedProducts.size > 0 && (
+                <>
+                  <button 
+                    className="btn"
+                    onClick={handleClearSelection}
+                    disabled={loading || !!roleError}
+                    style={{ backgroundColor: '#FF9800', color: 'white', fontSize: '0.9rem' }}
+                    title="Clear selection"
+                  >
+                    ✕ Clear ({selectedProducts.size})
+                  </button>
+                  <button 
+                    className="btn"
+                    onClick={handleDownloadQRSheet}
+                    disabled={loading || !!roleError}
+                    style={{ backgroundColor: '#4CAF50', color: 'white', fontSize: '0.9rem' }}
+                    title="Download QR sheet PDF for selected products"
+                  >
+                    📄 Download QR PDF ({selectedProducts.size})
+                  </button>
+                  <button 
+                    className="btn"
+                    onClick={handleBatchSend}
+                    disabled={loading || !!roleError || !isConnected}
+                    style={{ backgroundColor: '#9C27B0', color: 'white', fontSize: '0.9rem' }}
+                    title="Batch send selected products"
+                  >
+                    📤 Batch Send ({selectedProducts.size})
+                  </button>
+                  <button 
+                    className="btn"
+                    onClick={handleBatchDelete}
+                    disabled={loading || !!roleError}
+                    style={{ backgroundColor: '#ff4444', color: 'white', fontSize: '0.9rem' }}
+                    title="Delete selected products"
+                  >
+                    🗑️ Delete ({selectedProducts.size})
+                  </button>
+                </>
+              )}
+              <button 
+                className="btn"
+                onClick={handleCancelSelection}
+                disabled={loading || !!roleError}
+                style={{ backgroundColor: '#666', color: 'white', fontSize: '0.9rem' }}
+                title="Cancel selection mode"
+              >
+                ✕ Cancel
+              </button>
+            </>
+          )}
+          
           <button 
             className="btn"
-            onClick={handleScanProduct}
-            disabled={!!roleError}
+            onClick={() => handleScanProduct('send', true)}
+            disabled={!isConnected}
+            style={{ backgroundColor: '#9C27B0', color: 'white' }}
+          >
+            📦 Batch Scan & Send
+          </button>
+          <button 
+            className="btn"
+            onClick={() => handleScanProduct('send')}
+            disabled={!isConnected}
+            style={{ backgroundColor: '#1976d2', color: 'white' }}
+          >
+            📤 Scan to Send
+          </button>
+          <button 
+            className="btn"
+            onClick={() => handleScanProduct('receive')}
+            disabled={!isConnected}
             style={{ backgroundColor: '#4CAF50', color: 'white' }}
           >
-            📸 Scan Product
+            📥 Scan to Receive
           </button>
         </div>
       </div>
@@ -856,7 +1293,19 @@ function ProducerDashboard() {
       )}
 
       <div className="card">
-        <h2>My Products ({products.length})</h2>
+        <h2>
+          My Products ({products.length})
+          {isSelectionMode && selectedProducts.size > 0 && (
+            <span style={{ fontSize: '0.9rem', color: '#4CAF50', marginLeft: '0.5rem', fontWeight: 'normal' }}>
+              • {selectedProducts.size} selected
+            </span>
+          )}
+          {isSelectionMode && (
+            <span style={{ fontSize: '0.9rem', color: '#2196F3', marginLeft: '0.5rem', fontWeight: 'normal' }}>
+              (Selection Mode - Click products to select)
+            </span>
+          )}
+        </h2>
         {loading ? (
           <div className="loading-container">
             <span className="loading"></span> Loading products...
@@ -869,7 +1318,41 @@ function ProducerDashboard() {
               <div
                 key={product.tokenId}
                 className="product-card card"
+                style={{
+                  position: 'relative',
+                  border: isSelectionMode && selectedProducts.has(product.tokenId.toString()) 
+                    ? '2px solid #4CAF50' 
+                    : isSelectionMode 
+                    ? '2px solid #e0e0e0' 
+                    : undefined
+                }}
               >
+                {/* Selection checkbox - only show in selection mode */}
+                {isSelectionMode && (
+                  <div 
+                    style={{
+                      position: 'absolute',
+                      top: '10px',
+                      right: '10px',
+                      zIndex: 10
+                    }}
+                    onClick={(e) => handleToggleProductSelection(product.tokenId, e)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedProducts.has(product.tokenId.toString())}
+                      onChange={(e) => handleToggleProductSelection(product.tokenId, e)}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        width: '20px',
+                        height: '20px',
+                        cursor: 'pointer',
+                        accentColor: '#4CAF50'
+                      }}
+                      title="Select product"
+                    />
+                  </div>
+                )}
                 <div onClick={() => navigate(`/product/${product.tokenId}`)} style={{ cursor: 'pointer' }}>
                   {/* Square 1:1 Image */}
                   <div className="product-card-image-container">
@@ -879,9 +1362,42 @@ function ProducerDashboard() {
                         alt={product.metadata?.name || `Product #${product.tokenId}`}
                         className="product-card-image"
                         onError={(e) => {
-                          console.warn(`Failed to load image for product ${product.tokenId}:`, product.metadata.images[0].url);
-                          e.target.style.display = 'none';
-                          const parent = e.target.parentElement;
+                          const img = e.target;
+                          const originalUrl = img.src;
+                          
+                          // Track which gateway we've tried
+                          const triedGateways = img.dataset.triedGateways ? JSON.parse(img.dataset.triedGateways) : [];
+                          triedGateways.push(originalUrl);
+                          
+                          console.warn(`Failed to load image for product ${product.tokenId}:`, originalUrl);
+                          console.log(`Tried gateways so far:`, triedGateways);
+                          
+                          // Extract IPFS hash from URL
+                          const hashMatch = originalUrl.match(/\/ipfs\/([^\/\s?]+)/);
+                          if (hashMatch) {
+                            const hash = hashMatch[1];
+                            const allGateways = [
+                              `https://cloudflare-ipfs.com/ipfs/${hash}`,
+                              `https://ipfs.io/ipfs/${hash}`,
+                              `https://dweb.link/ipfs/${hash}`,
+                              `https://gateway.pinata.cloud/ipfs/${hash}`
+                            ];
+                            
+                            // Find the next gateway we haven't tried yet
+                            const nextGateway = allGateways.find(g => !triedGateways.includes(g));
+                            
+                            if (nextGateway) {
+                              console.log(`🔄 Trying alternative gateway: ${nextGateway}`);
+                              img.dataset.triedGateways = JSON.stringify(triedGateways);
+                              img.src = nextGateway;
+                              return; // Don't hide image yet, try next gateway
+                            }
+                          }
+                          
+                          // All gateways failed - hide image and show placeholder
+                          console.error(`❌ All gateways failed for product ${product.tokenId}`);
+                          img.style.display = 'none';
+                          const parent = img.parentElement;
                           if (parent) {
                             parent.innerHTML = '<div class="product-card-no-image">📦</div>';
                           }
@@ -950,24 +1466,6 @@ function ProducerDashboard() {
                   >
                     📥 QR Code
                   </button>
-                  <button
-                    className="btn"
-                    onClick={(e) => handleDelete(product.tokenId, e)}
-                    disabled={deleteLoading === product.tokenId || transferLoading === product.tokenId}
-                    style={{ 
-                      flex: '1 1 100%',
-                      backgroundColor: '#ff4444',
-                      color: 'white'
-                    }}
-                  >
-                    {deleteLoading === product.tokenId ? (
-                      <>
-                        <span className="loading"></span> Deleting...
-                      </>
-                    ) : (
-                      '🗑️ Delete'
-                    )}
-                  </button>
                 </div>
               </div>
             ))}
@@ -977,99 +1475,166 @@ function ProducerDashboard() {
 
       {/* Scanner Modal */}
       {showScanner && (
-        <Scanner
-          onScan={handleScanSuccess}
-          onError={handleScanError}
-          onClose={() => setShowScanner(false)}
-          mode="qr"
+        <div style={{ position: 'relative' }}>
+          <Scanner
+            onScan={handleScanSuccess}
+            onError={handleScanError}
+            onClose={() => {
+              setShowScanner(false);
+              if (batchMode && batchProducts.length > 0) {
+                setShowBatchModal(true);
+              }
+            }}
+            mode="qr"
+            continuous={batchMode} // Keep scanner open for batch mode
+          />
+          {batchMode && (
+            <div style={{
+              position: 'fixed',
+              top: '20px',
+              right: '20px',
+              zIndex: 10000,
+              backgroundColor: 'white',
+              padding: '1rem',
+              borderRadius: '8px',
+              boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+              maxWidth: '300px'
+            }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>Batch Mode</h3>
+              <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem' }}>
+                Scanned: {batchProducts.length} product(s)
+              </p>
+              {scanFeedback && (
+                <div style={{
+                  padding: '0.75rem',
+                  marginBottom: '0.5rem',
+                  borderRadius: '4px',
+                  backgroundColor: scanFeedback.type === 'success' ? '#d4edda' : 
+                                 scanFeedback.type === 'warning' ? '#fff3cd' : '#f8d7da',
+                  color: scanFeedback.type === 'success' ? '#155724' : 
+                        scanFeedback.type === 'warning' ? '#856404' : '#721c24',
+                  fontSize: '0.9rem',
+                  fontWeight: scanFeedback.type === 'warning' ? 'bold' : 'normal',
+                  border: scanFeedback.type === 'warning' ? '2px solid #ffc107' : 'none'
+                }}>
+                  {scanFeedback.message}
+                </div>
+              )}
+              {batchProducts.length > 0 && (
+                <div style={{
+                  padding: '0.5rem',
+                  marginBottom: '0.5rem',
+                  backgroundColor: '#e3f2fd',
+                  borderRadius: '4px',
+                  fontSize: '0.85rem',
+                  color: '#1976d2',
+                  maxHeight: '150px',
+                  overflowY: 'auto'
+                }}>
+                  <strong>Products added:</strong>
+                  <div style={{ marginTop: '0.5rem' }}>
+                    {batchProducts.map((p, idx) => (
+                      <div key={`${p.tokenId}-${idx}`} style={{ 
+                        padding: '0.25rem 0',
+                        borderBottom: idx < batchProducts.length - 1 ? '1px solid #90caf9' : 'none',
+                        fontSize: '0.8rem'
+                      }}>
+                        ✓ {p.metadata?.name || `Product #${p.tokenId}`}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setShowScanner(false);
+                    if (batchProducts.length > 0) {
+                      setShowBatchModal(true);
+                    }
+                  }}
+                  style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}
+                >
+                  Done ({batchProducts.length})
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setShowScanner(false);
+                    setBatchProducts([]);
+                    setBatchMode(false);
+                    scannedTokenIdsRef.current.clear(); // Clear scanned token IDs
+                  }}
+                  style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Batch Transfer Modal */}
+      {showBatchModal && (
+        <BatchTransferModal
+          isOpen={showBatchModal}
+          onClose={() => {
+            setShowBatchModal(false);
+            setBatchProducts([]);
+            setBatchMode(false);
+            scannedTokenIdsRef.current.clear(); // Clear scanned token IDs
+            loadProducts(); // Reload to show updated ownership
+            // Note: Selection is already cleared in handleBatchSend
+          }}
+          products={batchProducts}
+          provider={provider}
+          signer={signer}
+          account={account}
+          onSuccess={(message) => {
+            setSuccess(message);
+            setTimeout(() => setSuccess(''), 5000);
+          }}
+          onError={(error) => {
+            setError(error);
+            setTimeout(() => setError(''), 5000);
+          }}
         />
       )}
 
-      {/* Scanned Product Modal */}
+      {/* Secure Send Modal */}
       {scannedProduct && (
-        <div className="scanner-modal">
-          <div className="scanner-container" style={{ maxWidth: '500px' }}>
-            <div className="scanner-header">
-              <h3>📦 Scanned Product</h3>
-              <button 
-                className="btn-close" 
-                onClick={() => setScannedProduct(null)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            
-            <div style={{ padding: '1.5rem' }}>
-              {scannedProduct.metadata?.images && scannedProduct.metadata.images[0]?.url && (
-                <img 
-                  src={scannedProduct.metadata.images[0].url} 
-                  alt={scannedProduct.metadata.name || 'Product'}
-                  style={{ 
-                    width: '100%', 
-                    height: '200px', 
-                    objectFit: 'cover', 
-                    borderRadius: '8px',
-                    marginBottom: '1rem'
-                  }}
-                />
-              )}
-              
-              <h4 style={{ margin: '0 0 0.5rem 0' }}>
-                {scannedProduct.metadata?.name || `Product #${scannedProduct.tokenId}`}
-              </h4>
-              
-              {scannedProduct.metadata?.description && (
-                <p style={{ color: '#666', fontSize: '0.9rem', marginBottom: '1rem' }}>
-                  {scannedProduct.metadata.description}
-                </p>
-              )}
-              
-              <div style={{ 
-                padding: '1rem', 
-                background: '#f8f9fa', 
-                borderRadius: '8px',
-                marginBottom: '1rem'
-              }}>
-                <p style={{ margin: '0.25rem 0', fontSize: '0.9rem' }}>
-                  <strong>Token ID:</strong> {scannedProduct.tokenId}
-                </p>
-                <p style={{ margin: '0.25rem 0', fontSize: '0.9rem' }}>
-                  <strong>Owner:</strong> {scannedProduct.owner.substring(0, 6)}...{scannedProduct.owner.substring(scannedProduct.owner.length - 4)}
-                </p>
-                {scannedProduct.metadata?.serialNumber && (
-                  <p style={{ margin: '0.25rem 0', fontSize: '0.9rem' }}>
-                    <strong>Serial:</strong> {scannedProduct.metadata.serialNumber}
-                  </p>
-                )}
-              </div>
-              
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button 
-                  className="btn btn-primary"
-                  onClick={handleTransferScanned}
-                  disabled={transferLoading === scannedProduct.tokenId}
-                  style={{ flex: 1 }}
-                >
-                  {transferLoading === scannedProduct.tokenId ? (
-                    <>
-                      <span className="loading"></span> Transferring...
-                    </>
-                  ) : (
-                    '🔄 Transfer Product'
-                  )}
-                </button>
-                <button 
-                  className="btn"
-                  onClick={() => navigate(`/product/${scannedProduct.tokenId}`)}
-                  style={{ flex: 1 }}
-                >
-                  📋 View Details
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <SecureSendModal
+          isOpen={showSendModal}
+          onClose={() => {
+            setShowSendModal(false);
+            setScannedProduct(null);
+          }}
+          product={scannedProduct}
+          provider={provider}
+          signer={signer}
+          account={account}
+          onSuccess={handleSendSuccess}
+          onError={(err) => setError(err)}
+        />
+      )}
+
+      {/* Secure Receive Modal */}
+      {scannedProduct && (
+        <SecureReceiveModal
+          isOpen={showReceiveModal}
+          onClose={() => {
+            setShowReceiveModal(false);
+            setScannedProduct(null);
+          }}
+          product={scannedProduct}
+          provider={provider}
+          signer={signer}
+          account={account}
+          onSuccess={handleReceiveSuccess}
+          onError={(err) => setError(err)}
+        />
       )}
     </div>
   );

@@ -6,21 +6,39 @@ const network = import.meta.env.VITE_NETWORK_NAME || 'localhost';
 const LOCALHOST_ADDRESSES = {
   ParticipantRegistry: '0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1',
   ProductNFT: '0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE',
-  SupplyChain: '0x68B1D87F95878fE05B998F19b66F4baba5De1aed'
+  SupplyChain: '0x520DB859bA58bA94044F14C6ed5Ad01F05F30a04'
 };
 
 // Hardcoded addresses for Sepolia (from deployment)
 const SEPOLIA_ADDRESSES = {
   ParticipantRegistry: '0xB882B408727c752bEb54D7CA91750f2BDe38AAa0',
   ProductNFT: '0x7003CBbB7f84C3147f244bDB50CF1193A2cEAc59',
-  SupplyChain: '0x64c647e4c3cA34C421b446F01EC5B7Cdd7ceDecF'
+  SupplyChain: '0xfef50a2a46C7E89B108F9d5986B5BC72767B8c6B'
 };
 
-// Contract addresses - use hardcoded for localhost/sepolia or environment variables
+// Hardcoded addresses for Polygon Amoy Testnet (will be filled after deployment)
+const AMOY_ADDRESSES = {
+  ParticipantRegistry: '',
+  ProductNFT: '',
+  SupplyChain: ''
+};
+
+// Hardcoded addresses for Polygon Mainnet (will be filled after deployment)
+const POLYGON_ADDRESSES = {
+  ParticipantRegistry: '',
+  ProductNFT: '',
+  SupplyChain: ''
+};
+
+// Contract addresses - use hardcoded for localhost/sepolia/amoy/polygon or environment variables
 export const CONTRACT_ADDRESSES = network === 'localhost'
   ? LOCALHOST_ADDRESSES
   : network === 'sepolia'
   ? SEPOLIA_ADDRESSES
+  : network === 'amoy'
+  ? AMOY_ADDRESSES
+  : network === 'polygon'
+  ? POLYGON_ADDRESSES
   : {
       ParticipantRegistry: import.meta.env.VITE_PARTICIPANT_REGISTRY_ADDRESS || '',
       ProductNFT: import.meta.env.VITE_PRODUCT_NFT_ADDRESS || '',
@@ -41,6 +59,18 @@ export async function loadContractAddresses() {
   if (network === 'sepolia') {
     console.log('📍 Using Sepolia contract addresses:', SEPOLIA_ADDRESSES);
     return SEPOLIA_ADDRESSES;
+  }
+
+  // For Polygon Amoy Testnet, use hardcoded addresses
+  if (network === 'amoy') {
+    console.log('📍 Using Polygon Amoy testnet contract addresses:', AMOY_ADDRESSES);
+    return AMOY_ADDRESSES;
+  }
+
+  // For Polygon Mainnet, use hardcoded addresses
+  if (network === 'polygon') {
+    console.log('📍 Using Polygon mainnet contract addresses:', POLYGON_ADDRESSES);
+    return POLYGON_ADDRESSES;
   }
 
   // For other networks, try to load from environment or dynamic import
