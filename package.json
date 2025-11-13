@@ -10,6 +10,8 @@
     "deploy:amoy": "hardhat run scripts/deploy.js --network amoy",
     "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
     "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:modules": "hardhat run scripts/deploy-modules.js --network sepolia",
+    "deploy:modules:local": "hardhat run scripts/deploy-modules.js --network localhost",
     "node": "hardhat node"
   },
   "keywords": ["blockchain", "polygon", "nft", "ownership", "supply-chain"],

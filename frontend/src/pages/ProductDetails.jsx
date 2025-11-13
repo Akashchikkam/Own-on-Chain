@@ -27,12 +27,10 @@ function ProductDetails() {
   const loadProductDetails = async () => {
     try {
       setLoading(true);
+      setError('');
       
-      // Load product data
-      const productData = await supplyChainService.getProduct(provider, tokenId);
+      // Load NFT data first (always available)
       const productInfo = await productNFTService.getProductInfo(provider, tokenId);
-      const isWarrantyValid = await productNFTService.isWarrantyValid(provider, tokenId);
-      const isAuthentic = await supplyChainService.verifyAuthenticity(provider, tokenId);
       const owner = await productNFTService.ownerOf(provider, tokenId);
       const history = await productNFTService.getTransferHistory(provider, tokenId);
       
@@ -47,8 +45,34 @@ function ProductDetails() {
         });
       });
       
+      // Try to load SupplyChain data, but handle gracefully if product doesn't exist there
+      let productData = null;
+      let isAuthentic = false;
+      let isWarrantyValid = false;
+      
+      try {
+        productData = await supplyChainService.getProduct(provider, tokenId);
+        isAuthentic = await supplyChainService.verifyAuthenticity(provider, tokenId);
+        console.log(`  ✅ Token ${tokenId} found in SupplyChain`);
+      } catch (supplyChainErr) {
+        // Product might not be registered in SupplyChain yet (e.g., old products or just created)
+        if (supplyChainErr.message && supplyChainErr.message.includes('Product does not exist')) {
+          console.warn(`  ⚠️ Token ${tokenId} not registered in SupplyChain (may be old product)`);
+        } else {
+          console.error(`  ❌ Error loading product ${tokenId} from SupplyChain:`, supplyChainErr);
+        }
+        // Continue with NFT data only
+      }
+      
+      // Try to get warranty status if available
+      try {
+        isWarrantyValid = await productNFTService.isWarrantyValid(provider, tokenId);
+      } catch (warrantyErr) {
+        console.warn(`  ⚠️ Could not check warranty status:`, warrantyErr);
+      }
+      
       setProduct({
-        ...productData,
+        ...(productData || {}), // Spread product data if available
         ...productInfo,
         isWarrantyValid,
         isAuthentic,
@@ -61,11 +85,27 @@ function ProductDetails() {
       try {
         const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
         console.log('📋 Token URI:', tokenURI);
-        const metadataResult = await retrieveFromIPFS(tokenURI);
-        console.log('📋 Metadata result:', metadataResult);
-        if (metadataResult.success) {
-          console.log('🖼️ Images in metadata:', metadataResult.data.images);
-          setMetadata(metadataResult.data);
+        
+        if (!tokenURI || tokenURI === '') {
+          console.warn(`  ⚠️ Token ${tokenId} has empty tokenURI`);
+        } else {
+          const metadataResult = await retrieveFromIPFS(tokenURI);
+          console.log('📋 Metadata result:', metadataResult);
+          if (metadataResult.success && metadataResult.data) {
+            console.log('🖼️ Images in metadata:', metadataResult.data.images);
+            
+            // Process image URLs to ensure they're accessible (convert IPFS URLs to gateway URLs)
+            if (metadataResult.data.images && Array.isArray(metadataResult.data.images)) {
+              metadataResult.data.images = metadataResult.data.images.map(img => ({
+                ...img,
+                url: ipfsToGatewayUrl(img.url || img.ipfsUrl) // Convert both url and ipfsUrl to gateway URL
+              }));
+            }
+            
+            setMetadata(metadataResult.data);
+          } else {
+            console.warn(`  ⚠️ Token ${tokenId} metadata retrieval failed:`, metadataResult);
+          }
         }
       } catch (metaErr) {
         console.error('Error loading metadata:', metaErr);
@@ -75,8 +115,9 @@ function ProductDetails() {
       const names = {};
       const addressesToFetch = new Set();
       
-      // Add producer
-      if (productData.producer) addressesToFetch.add(productData.producer.toLowerCase());
+      // Add producer (from SupplyChain if available, otherwise from NFT info)
+      const producer = productData?.producer || productInfo?.producer;
+      if (producer) addressesToFetch.add(producer.toLowerCase());
       // Add addresses from transfer history
       history.forEach(record => {
         if (record.from && record.from !== '0x0000000000000000000000000000000000000000') {
@@ -219,10 +260,10 @@ function ProductDetails() {
       <div className="grid grid-2">
         <div className="card">
           <h2>Product Information</h2>
-          {metadata?.images && metadata.images.length > 0 && metadata.images[0].url && (
+          {metadata?.images && metadata.images.length > 0 && metadata.images[0].url ? (
             <div className="product-image-container" style={{ marginBottom: '1rem' }}>
               <img
-                src={metadata.images[0].url}
+                src={ipfsToGatewayUrl(metadata.images[0].url)}
                 alt={metadata.name || 'Product image'}
                 className="product-image"
                 style={{ 
@@ -232,10 +273,45 @@ function ProductDetails() {
                   display: 'block'
                 }}
                 onError={(e) => {
-                  console.error('❌ Image load error');
-                  console.error('Image URL:', metadata.images[0].url);
-                  console.error('Image object:', metadata.images[0]);
-                  e.target.style.display = 'none';
+                  const img = e.target;
+                  const originalUrl = img.src;
+                  
+                  // Track which gateway we've tried
+                  const triedGateways = img.dataset.triedGateways ? JSON.parse(img.dataset.triedGateways) : [];
+                  triedGateways.push(originalUrl);
+                  
+                  console.warn(`Failed to load image for product ${tokenId}:`, originalUrl);
+                  console.log(`Tried gateways so far:`, triedGateways);
+                  
+                  // Extract IPFS hash from URL
+                  const hashMatch = originalUrl.match(/\/ipfs\/([^\/\s?]+)/);
+                  if (hashMatch) {
+                    const hash = hashMatch[1];
+                    const allGateways = [
+                      `https://cloudflare-ipfs.com/ipfs/${hash}`,
+                      `https://ipfs.io/ipfs/${hash}`,
+                      `https://dweb.link/ipfs/${hash}`,
+                      `https://gateway.pinata.cloud/ipfs/${hash}`
+                    ];
+                    
+                    // Find the next gateway we haven't tried yet
+                    const nextGateway = allGateways.find(g => !triedGateways.includes(g));
+                    
+                    if (nextGateway) {
+                      console.log(`🔄 Trying alternative gateway: ${nextGateway}`);
+                      img.dataset.triedGateways = JSON.stringify(triedGateways);
+                      img.src = nextGateway;
+                      return; // Don't hide image yet, try next gateway
+                    }
+                  }
+                  
+                  // All gateways failed - hide image and show placeholder
+                  console.error(`❌ All gateways failed for product ${tokenId}`);
+                  img.style.display = 'none';
+                  const parent = img.parentElement;
+                  if (parent) {
+                    parent.innerHTML = '<div style="padding: 2rem; background: #f5f5f5; border-radius: 8px; text-align: center; color: #666;">📦 Image unavailable</div>';
+                  }
                 }}
                 onLoad={() => {
                   console.log('✅ Image loaded successfully!');
@@ -243,8 +319,7 @@ function ProductDetails() {
                 }}
               />
             </div>
-          )}
-          {(!metadata?.images || metadata.images.length === 0) && (
+          ) : (
             <div style={{ 
               padding: '2rem', 
               background: '#f5f5f5', 

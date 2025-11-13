@@ -1,10 +1,17 @@
 {
   "network": "sepolia",
   "deployer": "0x4125ddf0B51073B994ECc790e22D01749Ce73bCa",
-  "timestamp": "2025-11-01T09:53:13.692Z",
+  "timestamp": "2025-11-04T10:30:00.866Z",
+  "migration": true,
+  "migratedFrom": {
+    "SupplyChain": "0x64c647e4c3cA34C421b446F01EC5B7Cdd7ceDecF"
+  },
   "contracts": {
     "ParticipantRegistry": "0xB882B408727c752bEb54D7CA91750f2BDe38AAa0",
     "ProductNFT": "0x7003CBbB7f84C3147f244bDB50CF1193A2cEAc59",
-    "SupplyChain": "0x64c647e4c3cA34C421b446F01EC5B7Cdd7ceDecF"
-  }
+    "SupplyChain": "0xfef50a2a46C7E89B108F9d5986B5BC72767B8c6B",
+    "ProductIdentifier": "0x777780878118E392f0258dbeF9fb30D49Bb8ae92",
+    "GtinLinker": "0x568148eed30595FDB0526773D62701EFb8eA8484"
+  },
+  "modulesDeployed": "2025-11-06T23:08:49.269Z"
 }

@@ -11,6 +11,16 @@
           "internalType": "address",
           "name": "_productNFT",
           "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_productIdentifier",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_gtinLinker",
+          "type": "address"
         }
       ],
       "stateMutability": "nonpayable",
@@ -128,6 +138,65 @@
       ],
       "name": "ProductTransferredToRetailer",
       "type": "event"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256[]",
+          "name": "_tokenIds",
+          "type": "uint256[]"
+        },
+        {
+          "internalType": "address",
+          "name": "_buyer",
+          "type": "address"
+        },
+        {
+          "internalType": "string",
+          "name": "_saleDetails",
+          "type": "string"
+        }
+      ],
+      "name": "batchSellToBuyer",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256[]",
+          "name": "_tokenIds",
+          "type": "uint256[]"
+        },
+        {
+          "internalType": "address",
+          "name": "_distributor",
+          "type": "address"
+        }
+      ],
+      "name": "batchTransferToDistributor",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256[]",
+          "name": "_tokenIds",
+          "type": "uint256[]"
+        },
+        {
+          "internalType": "address",
+          "name": "_retailer",
+          "type": "address"
+        }
+      ],
+      "name": "batchTransferToRetailer",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
     },
     {
       "inputs": [
@@ -275,6 +344,25 @@
           "type": "uint256"
         }
       ],
+      "name": "getProductProducer",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "_tokenId",
+          "type": "uint256"
+        }
+      ],
       "name": "getProductStatus",
       "outputs": [
         {
@@ -288,10 +376,36 @@
     },
     {
       "inputs": [],
+      "name": "gtinLinker",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
       "name": "participantRegistry",
       "outputs": [
         {
           "internalType": "contract ParticipantRegistry",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "productIdentifier",
+      "outputs": [
+        {
+          "internalType": "address",
           "name": "",
           "type": "address"
         }
@@ -413,6 +527,32 @@
         }
       ],
       "name": "sellToBuyer",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "_gtinLinker",
+          "type": "address"
+        }
+      ],
+      "name": "setGtinLinker",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "_productIdentifier",
+          "type": "address"
+        }
+      ],
+      "name": "setProductIdentifier",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

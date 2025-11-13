@@ -14,6 +14,7 @@ import './Scanner.css';
  * @param {string} props.mode - 'qr' or 'barcode' (default: 'qr')
  * @param {number} props.fps - Frames per second (default: 10)
  * @param {number} props.qrbox - Size of QR scanning box (default: 250)
+ * @param {boolean} props.continuous - Keep scanner open after scan for batch mode (default: false)
  */
 function Scanner({ 
   onScan, 
@@ -21,23 +22,38 @@ function Scanner({
   onClose,
   mode: initialMode = 'qr',
   fps = 10,
-  qrbox = 250
+  qrbox = 250,
+  continuous = false // For batch scanning mode
 }) {
   const [mode, setMode] = useState(initialMode);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState(null);
   const [lastScan, setLastScan] = useState(null);
+  const [lastScanTime, setLastScanTime] = useState(0); // Track when last scan occurred
+  const scannedCodesRef = useRef(new Set()); // Use ref for synchronous duplicate checking
   const scannerRef = useRef(null);
   const qrScannerRef = useRef(null);
   
   useEffect(() => {
-    // Start scanner when component mounts or mode changes
-    startScanner();
+    let isMounted = true;
     
-    // Cleanup when component unmounts
+    // Start scanner when component mounts or mode changes
+    const init = async () => {
+      // Small delay to ensure DOM is ready
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (isMounted) {
+        await startScanner();
+      }
+    };
+    
+    init();
+    
+    // Cleanup when component unmounts or mode changes
     return () => {
+      isMounted = false;
       stopScanner();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
   
   const startScanner = async () => {
@@ -58,11 +74,23 @@ function Scanner({
     }
   };
   
-  const stopScanner = () => {
+  const stopScanner = async () => {
     try {
       if (mode === 'qr' && qrScannerRef.current) {
-        qrScannerRef.current.clear();
+        try {
+          await qrScannerRef.current.clear().catch(err => {
+            console.warn('Error clearing QR scanner:', err);
+          });
+        } catch (err) {
+          console.warn('Error stopping QR scanner:', err);
+        }
         qrScannerRef.current = null;
+        
+        // Clear the container
+        const container = document.getElementById('qr-scanner-region');
+        if (container) {
+          container.innerHTML = '';
+        }
       } else if (mode === 'barcode' && Quagga.initialized) {
         Quagga.stop();
       }
@@ -75,7 +103,37 @@ function Scanner({
   const startQRScanner = async () => {
     const scannerId = 'qr-scanner-region';
     
+    // Ensure DOM element exists before initializing
+    const element = document.getElementById(scannerId);
+    if (!element) {
+      // Wait a bit for DOM to be ready
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const elementAfterWait = document.getElementById(scannerId);
+      if (!elementAfterWait) {
+        throw new Error('QR scanner container not found in DOM');
+      }
+    }
+    
+    // Clean up any existing scanner first
+    if (qrScannerRef.current) {
+      try {
+        qrScannerRef.current.clear().catch(err => {
+          console.warn('Error clearing previous QR scanner:', err);
+        });
+      } catch (err) {
+        console.warn('Error stopping previous QR scanner:', err);
+      }
+      qrScannerRef.current = null;
+    }
+    
+    // Clear the container
+    const container = document.getElementById(scannerId);
+    if (container) {
+      container.innerHTML = '';
+    }
+    
     // Create QR scanner
+    // Note: Removed formatsToSupport to avoid BarcodeDetector API issues with empty hints
     const qrScanner = new Html5QrcodeScanner(
       scannerId,
       {
@@ -84,7 +142,9 @@ function Scanner({
         aspectRatio: 1.0,
         showTorchButtonIfSupported: true,
         showZoomSliderIfSupported: true,
-        formatsToSupport: ['QR_CODE']
+        rememberLastUsedCamera: true
+        // Don't specify formatsToSupport - let it use default QR code detection
+        // This avoids "Hint option provided, but is empty" error
       },
       false // verbose
     );
@@ -95,15 +155,30 @@ function Scanner({
     const onScanSuccess = (decodedText, decodedResult) => {
       console.log('QR scan success:', decodedText);
       
-      // Prevent duplicate scans
-      if (decodedText === lastScan) return;
+      // STRICT duplicate prevention: Use ref for synchronous checking
+      // This prevents security issues where users can add the same product multiple times
+      if (scannedCodesRef.current.has(decodedText)) {
+        console.log('🔒 Duplicate scan BLOCKED (same QR code already scanned)');
+        return; // Completely block duplicate scans
+      }
+      
+      // Additional time-based check for rapid scanning (2 seconds)
+      const now = Date.now();
+      if (decodedText === lastScan && (now - lastScanTime) < 2000) {
+        console.log('🔒 Duplicate scan prevented (same QR within 2 seconds)');
+        return;
+      }
+      
+      // Mark this code as scanned IMMEDIATELY and SYNCHRONOUSLY to prevent duplicates
+      scannedCodesRef.current.add(decodedText);
       setLastScan(decodedText);
+      setLastScanTime(now);
       
       // Parse the URL if it's a verification link
       let result = {
         raw: decodedText,
         type: 'qr',
-        format: decodedResult.result.format?.formatName || 'QR_CODE'
+        format: decodedResult?.result?.format?.formatName || 'QR_CODE'
       };
       
       // Try to parse as URL
@@ -125,22 +200,34 @@ function Scanner({
       
       if (onScan) onScan(result);
       
-      // Auto-close scanner after successful scan
-      setTimeout(() => {
-        stopScanner();
-      }, 500);
+      // Only auto-close scanner if not in continuous mode (batch scanning)
+      if (!continuous) {
+        setTimeout(() => {
+          stopScanner();
+        }, 500);
+      }
+      // In continuous mode, keep scanner open but don't reset scannedCodesRef
+      // This ensures the same QR code can never be scanned twice in the same session
     };
     
     // Error callback
     const onScanFailure = (error) => {
       // Ignore "NotFoundException" errors (no QR code in frame)
-      if (!error.includes('NotFoundException')) {
+      if (!error || !error.includes || !error.includes('NotFoundException')) {
         console.warn('QR scan error:', error);
       }
     };
     
     // Render the scanner
-    qrScanner.render(onScanSuccess, onScanFailure);
+    try {
+      qrScanner.render(onScanSuccess, onScanFailure);
+      setIsScanning(true);
+    } catch (renderError) {
+      console.error('Error rendering QR scanner:', renderError);
+      setError(`Failed to start QR scanner: ${renderError.message}`);
+      setIsScanning(false);
+      throw renderError;
+    }
   };
   
   const startBarcodeScanner = async () => {
@@ -198,9 +285,23 @@ function Scanner({
         
         console.log('Barcode detected:', code, format);
         
-        // Prevent duplicate scans
-        if (code === lastScan) return;
+        // STRICT duplicate prevention: Use ref for synchronous checking
+        if (scannedCodesRef.current.has(code)) {
+          console.log('🔒 Duplicate scan BLOCKED (same barcode already scanned)');
+          return; // Completely block duplicate scans
+        }
+        
+        // Additional time-based check for rapid scanning (2 seconds)
+        const now = Date.now();
+        if (code === lastScan && (now - lastScanTime) < 2000) {
+          console.log('🔒 Duplicate scan prevented (same barcode within 2 seconds)');
+          return;
+        }
+        
+        // Mark this code as scanned IMMEDIATELY and SYNCHRONOUSLY to prevent duplicates
+        scannedCodesRef.current.add(code);
         setLastScan(code);
+        setLastScanTime(now);
         
         // Validate barcode (must be numeric for GTIN/UPC/EAN)
         if (!/^[0-9]+$/.test(code)) {
@@ -218,10 +319,13 @@ function Scanner({
         
         if (onScan) onScan(scanResult);
         
-        // Auto-close scanner after successful scan
-        setTimeout(() => {
-          stopScanner();
-        }, 500);
+        // Only auto-close scanner if not in continuous mode (batch scanning)
+        if (!continuous) {
+          setTimeout(() => {
+            stopScanner();
+          }, 500);
+        }
+        // In continuous mode, keep scanner open but don't reset scannedCodesRef
       });
     });
   };
@@ -230,6 +334,7 @@ function Scanner({
     stopScanner();
     setMode(mode === 'qr' ? 'barcode' : 'qr');
     setLastScan(null);
+    scannedCodesRef.current.clear(); // Clear scanned codes when switching modes
   };
   
   return (

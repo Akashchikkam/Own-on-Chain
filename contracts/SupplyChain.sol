@@ -12,6 +12,10 @@ contract SupplyChain {
     
     ParticipantRegistry public participantRegistry;
     ProductNFT public productNFT;
+    
+    // Optional modules (can be address(0) if not used)
+    address public productIdentifier;  // Blockchain ID module
+    address public gtinLinker;         // GTIN linking module
 
     enum ProductStatus {
         MANUFACTURED,
@@ -44,12 +48,35 @@ contract SupplyChain {
     event ProductSoldToBuyer(uint256 indexed tokenId, address indexed buyer, string saleDetails);
     event ProductResold(uint256 indexed tokenId, address indexed from, address indexed to);
 
-    constructor(address _participantRegistry, address _productNFT) {
+    constructor(
+        address _participantRegistry, 
+        address _productNFT,
+        address _productIdentifier,  // Optional: Blockchain ID module
+        address _gtinLinker          // Optional: GTIN linking module
+    ) {
         require(_participantRegistry != address(0), "Invalid ParticipantRegistry address");
         require(_productNFT != address(0), "Invalid ProductNFT address");
         
         participantRegistry = ParticipantRegistry(_participantRegistry);
         productNFT = ProductNFT(_productNFT);
+        productIdentifier = _productIdentifier;
+        gtinLinker = _gtinLinker;
+    }
+    
+    /**
+     * @dev Set product identifier module (only owner or can be set during deployment)
+     */
+    function setProductIdentifier(address _productIdentifier) external {
+        // In production, add onlyOwner modifier
+        productIdentifier = _productIdentifier;
+    }
+    
+    /**
+     * @dev Set GTIN linker module (only owner or can be set during deployment)
+     */
+    function setGtinLinker(address _gtinLinker) external {
+        // In production, add onlyOwner modifier
+        gtinLinker = _gtinLinker;
     }
 
     /**
@@ -299,6 +326,133 @@ contract SupplyChain {
     function checkWarranty(uint256 _tokenId) external view returns (bool) {
         require(products[_tokenId].tokenId != 0, "Product does not exist");
         return productNFT.isWarrantyValid(_tokenId);
+    }
+
+    /**
+     * @dev Batch transfer products to distributor (single transaction)
+     * @param _tokenIds Array of product token IDs
+     * @param _distributor Address of the distributor
+     */
+    function batchTransferToDistributor(uint256[] memory _tokenIds, address _distributor) external onlyVerified {
+        require(_tokenIds.length > 0, "No tokens provided");
+        require(
+            participantRegistry.hasRole(_distributor, ParticipantRegistry.Role.DISTRIBUTOR),
+            "Recipient is not a verified distributor"
+        );
+
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            uint256 tokenId = _tokenIds[i];
+            Product storage product = products[tokenId];
+            
+            require(product.tokenId != 0, "Product does not exist");
+            require(product.currentOwner == msg.sender, "Not current owner");
+            require(
+                product.status == ProductStatus.MANUFACTURED || 
+                product.status == ProductStatus.WITH_DISTRIBUTOR,
+                "Invalid product status for this transfer"
+            );
+
+            // Record and execute transfer
+            productNFT.recordTransfer(tokenId, msg.sender, _distributor, "supply_chain");
+            productNFT.executeTransfer(msg.sender, _distributor, tokenId);
+
+            // Update product tracking
+            product.currentOwner = _distributor;
+            product.distributor = _distributor;
+            product.status = ProductStatus.WITH_DISTRIBUTOR;
+
+            emit ProductTransferredToDistributor(tokenId, _distributor);
+        }
+    }
+
+    /**
+     * @dev Batch transfer products to retailer (single transaction)
+     * @param _tokenIds Array of product token IDs
+     * @param _retailer Address of the retailer
+     */
+    function batchTransferToRetailer(uint256[] memory _tokenIds, address _retailer) external onlyVerified {
+        require(_tokenIds.length > 0, "No tokens provided");
+        require(
+            participantRegistry.hasRole(_retailer, ParticipantRegistry.Role.RETAILER),
+            "Recipient is not a verified retailer"
+        );
+
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            uint256 tokenId = _tokenIds[i];
+            Product storage product = products[tokenId];
+            
+            require(product.tokenId != 0, "Product does not exist");
+            require(product.currentOwner == msg.sender, "Not current owner");
+            require(
+                product.status == ProductStatus.MANUFACTURED || 
+                product.status == ProductStatus.WITH_DISTRIBUTOR ||
+                product.status == ProductStatus.WITH_RETAILER,
+                "Invalid product status for this transfer"
+            );
+
+            // Record and execute transfer
+            productNFT.recordTransfer(tokenId, msg.sender, _retailer, "supply_chain");
+            productNFT.executeTransfer(msg.sender, _retailer, tokenId);
+
+            // Update product tracking
+            product.currentOwner = _retailer;
+            product.retailer = _retailer;
+            product.status = ProductStatus.WITH_RETAILER;
+
+            emit ProductTransferredToRetailer(tokenId, _retailer);
+        }
+    }
+
+    /**
+     * @dev Batch sell products to buyer (single transaction)
+     * @param _tokenIds Array of product token IDs
+     * @param _buyer Address of the buyer
+     * @param _saleDetails IPFS hash of sale details/receipt (same for all products)
+     */
+    function batchSellToBuyer(uint256[] memory _tokenIds, address _buyer, string memory _saleDetails) external onlyVerified {
+        require(_tokenIds.length > 0, "No tokens provided");
+        require(_buyer != address(0), "Invalid buyer address");
+        require(
+            participantRegistry.isVerifiedParticipant(_buyer),
+            "Buyer must be a verified participant"
+        );
+
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            uint256 tokenId = _tokenIds[i];
+            Product storage product = products[tokenId];
+            
+            require(product.tokenId != 0, "Product does not exist");
+            require(product.currentOwner == msg.sender, "Not current owner");
+            require(
+                product.status == ProductStatus.MANUFACTURED || 
+                product.status == ProductStatus.WITH_DISTRIBUTOR ||
+                product.status == ProductStatus.WITH_RETAILER,
+                "Product already sold"
+            );
+
+            // Record and execute transfer
+            productNFT.recordTransfer(tokenId, msg.sender, _buyer, "sale");
+            productNFT.executeTransfer(msg.sender, _buyer, tokenId);
+
+            // Update product tracking
+            product.currentOwner = _buyer;
+            product.buyer = _buyer;
+            product.status = ProductStatus.SOLD_TO_BUYER;
+            product.saleDate = block.timestamp;
+            product.saleDetails = _saleDetails;
+
+            emit ProductSoldToBuyer(tokenId, _buyer, _saleDetails);
+        }
+    }
+    
+    /**
+     * @dev Get product producer (helper for GtinLinker)
+     * @param _tokenId Token ID
+     * @return producer Producer address
+     */
+    function getProductProducer(uint256 _tokenId) external view returns (address) {
+        require(products[_tokenId].tokenId != 0, "Product does not exist");
+        return products[_tokenId].producer;
     }
 }
 

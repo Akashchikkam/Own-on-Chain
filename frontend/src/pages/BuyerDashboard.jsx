@@ -1,8 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useWeb3 } from '../context/Web3Context';
 import { supplyChainService, productNFTService } from '../utils/contractHelpers';
-import { retrieveFromIPFS } from '../utils/ipfs';
+import { retrieveFromIPFS, ipfsToGatewayUrl } from '../utils/ipfs';
 import { useNavigate } from 'react-router-dom';
+import Scanner from '../components/Scanner';
+import SecureSendModal from '../components/SecureSendModal';
+import SecureReceiveModal from '../components/SecureReceiveModal';
+import { getBackendApiUrl } from '../utils/api';
 import './Dashboard.css';
 
 function BuyerDashboard() {
@@ -15,6 +19,17 @@ function BuyerDashboard() {
   const [success, setSuccess] = useState('');
   const [roleError, setRoleError] = useState('');
   const [accountInfo, setAccountInfo] = useState(null);
+  
+  // General product selection state
+  const [selectedProducts, setSelectedProducts] = useState(new Set());
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  
+  // Scanner state
+  const [showScanner, setShowScanner] = useState(false);
+  const [scannedProduct, setScannedProduct] = useState(null);
+  const [scanMode, setScanMode] = useState(null); // 'send' or 'receive'
+  const [showSendModal, setShowSendModal] = useState(false);
+  const [showReceiveModal, setShowReceiveModal] = useState(false);
 
   useEffect(() => {
     if (isConnected && account && provider) {
@@ -229,31 +244,276 @@ function BuyerDashboard() {
     }
   };
 
-  const handleTransfer = async (tokenId) => {
-    const recipientAddress = prompt('Enter recipient wallet address:');
-    if (!recipientAddress) return;
+  const handleTransfer = async (tokenId, e) => {
+    if (e) e.stopPropagation();
+    
+    // Find the product in the products array
+    const product = products.find(p => p.tokenId === tokenId);
+    if (!product) {
+      setError('Product not found');
+      return;
+    }
 
-    // Validate address format
-    if (!recipientAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
-      setError('Invalid address format. Please enter a valid Ethereum address.');
+    // Load full product details (owner, metadata) if not already loaded
+    try {
+      setLoading(true);
+      const owner = await productNFTService.ownerOf(provider, tokenId);
+      const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
+      
+      let metadata = product.metadata;
+      if (!metadata && tokenURI && tokenURI !== '') {
+        const result = await retrieveFromIPFS(tokenURI);
+        if (result) {
+          metadata = result;
+          if (metadata.images && metadata.images.length > 0) {
+            metadata.images = metadata.images.map(img => ({
+              ...img,
+              url: ipfsToGatewayUrl(img.url || img.ipfsUrl)
+            }));
+          }
+        }
+      }
+
+      const transferProduct = {
+        tokenId,
+        owner,
+        metadata: metadata || product.metadata
+      };
+
+      setScannedProduct(transferProduct);
+      setShowSendModal(true);
+    } catch (err) {
+      console.error('Error loading product for transfer:', err);
+      setError('Failed to load product details for transfer');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Selection handlers
+  const handleToggleProductSelection = (tokenId, e) => {
+    e.stopPropagation();
+    const tokenIdStr = tokenId.toString();
+    setSelectedProducts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(tokenIdStr)) {
+        newSet.delete(tokenIdStr);
+      } else {
+        newSet.add(tokenIdStr);
+      }
+      return newSet;
+    });
+  };
+
+  const handleSelectAllProducts = () => {
+    const allTokenIds = new Set(products.map(p => p.tokenId.toString()));
+    setSelectedProducts(allTokenIds);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedProducts(new Set());
+  };
+
+  const handleCancelSelection = () => {
+    setSelectedProducts(new Set());
+    setIsSelectionMode(false);
+  };
+
+  const handleDownloadQRSheet = async () => {
+    const productsToDownload = products.filter(p => selectedProducts.has(p.tokenId.toString()));
+
+    if (productsToDownload.length === 0) {
+      setError('Please select at least one product to download QR sheet.');
+      setTimeout(() => setError(''), 5000);
       return;
     }
 
     try {
-      setResaleLoading(tokenId);
+      setLoading(true);
       setError('');
-      setSuccess('');
+      
+      const tokenIds = productsToDownload.map(p => p.tokenId);
+      const productData = productsToDownload.map(p => ({
+        tokenId: p.tokenId,
+        name: p.metadata?.name || `Product #${p.tokenId}`,
+        serialNumber: p.metadata?.serialNumber || null,
+        model: p.metadata?.model || null,
+        productId: p.metadata?.productId || null
+      }));
+      const baseUrl = window.location.origin;
 
-      await productNFTService.transferTo(signer, tokenId, recipientAddress);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      
+      try {
+        const response = await fetch(getBackendApiUrl('/qr-sheet/generate'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            tokenIds,
+            productData,
+            baseUrl
+          }),
+          signal: controller.signal
+        });
 
-      setSuccess(`Product #${tokenId} transferred successfully!`);
-      await loadProducts();
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          let errorMessage = 'Failed to generate QR sheet PDF';
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorMessage;
+          } catch (e) {
+            errorMessage = `Server error: ${response.status} ${response.statusText}`;
+          }
+          throw new Error(errorMessage);
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/pdf')) {
+          try {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Server returned non-PDF response');
+          } catch (e) {
+            throw new Error('Server returned invalid response format');
+          }
+        }
+
+        const blob = await response.blob();
+        
+        if (blob.size === 0) {
+          throw new Error('Generated PDF is empty');
+        }
+        
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `qr-sheet-${Date.now()}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+
+        setSuccess(`QR Sheet PDF generated successfully with ${productsToDownload.length} product${productsToDownload.length > 1 ? 's' : ''}!`);
+        setTimeout(() => setSuccess(''), 3000);
+        
+        setSelectedProducts(new Set());
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Request timed out. Please try again with fewer products.');
+        }
+        throw fetchError;
+      }
     } catch (err) {
-      console.error('Transfer error:', err);
-      setError(err.message || 'Failed to transfer product');
+      console.error('Error generating QR sheet:', err);
+      setError(err.message || 'Failed to generate QR sheet PDF');
     } finally {
-      setResaleLoading(null);
+      setLoading(false);
     }
+  };
+
+  const handleScanProduct = (mode = 'send') => {
+    setScanMode(mode);
+    setShowScanner(true);
+  };
+
+  const handleScanSuccess = async (result) => {
+    console.log('Scan result:', result);
+    setShowScanner(false);
+    
+    try {
+      let tokenId;
+      
+      // Extract token ID from scan result
+      if (result.tokenId) {
+        tokenId = result.tokenId;
+      } else if (result.url) {
+        const urlPath = result.url.pathname;
+        if (urlPath.includes('/verify/')) {
+          tokenId = urlPath.split('/verify/')[1];
+        }
+      } else if (result.raw) {
+        try {
+          const url = new URL(result.raw);
+          if (url.pathname.includes('/verify/')) {
+            tokenId = url.pathname.split('/verify/')[1];
+          }
+        } catch (e) {
+          tokenId = result.raw;
+        }
+      }
+      
+      if (!tokenId) {
+        setError('Could not extract product information from scan.');
+        return;
+      }
+      
+      // Fetch product details
+      setLoading(true);
+      const owner = await productNFTService.ownerOf(provider, tokenId);
+      const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
+      
+      // Check if product exists and get metadata
+      let metadata = null;
+      if (tokenURI && tokenURI !== '') {
+        const result = await retrieveFromIPFS(tokenURI);
+        if (result) {
+          metadata = result;
+          if (metadata.images && metadata.images.length > 0) {
+            metadata.images = metadata.images.map(img => ({
+              ...img,
+              url: ipfsToGatewayUrl(img.url || img.ipfsUrl)
+            }));
+          }
+        }
+      }
+      
+      setScannedProduct({
+        tokenId,
+        owner,
+        metadata
+      });
+      
+      // Based on scan mode, open appropriate modal
+      if (scanMode === 'send') {
+        setShowSendModal(true);
+      } else if (scanMode === 'receive') {
+        setShowReceiveModal(true);
+      } else {
+        setSuccess(`Product #${tokenId} scanned successfully!`);
+      }
+      
+    } catch (err) {
+      console.error('Error loading scanned product:', err);
+      setError('Failed to load product details. Product may not exist.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleScanError = (error) => {
+    console.error('Scan error:', error);
+    setError('Failed to scan. Please try again.');
+  };
+
+  const handleSendSuccess = (message) => {
+    setSuccess(message);
+    setScannedProduct(null);
+    setShowSendModal(false);
+    loadProducts();
+    setTimeout(() => setSuccess(''), 5000);
+  };
+
+  const handleReceiveSuccess = (message) => {
+    setSuccess(message);
+    setScannedProduct(null);
+    setShowReceiveModal(false);
+    loadProducts();
+    setTimeout(() => setSuccess(''), 5000);
   };
 
   if (!isConnected) {
@@ -306,7 +566,94 @@ function BuyerDashboard() {
       )}
 
       <div className="card">
-        <h2>My Products ({products.length})</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+          <h2 style={{ margin: 0 }}>
+            My Products ({products.length})
+            {isSelectionMode && selectedProducts.size > 0 && (
+              <span style={{ fontSize: '0.9rem', color: '#4CAF50', marginLeft: '0.5rem', fontWeight: 'normal' }}>
+                • {selectedProducts.size} selected
+              </span>
+            )}
+            {isSelectionMode && (
+              <span style={{ fontSize: '0.9rem', color: '#2196F3', marginLeft: '0.5rem', fontWeight: 'normal' }}>
+                (Selection Mode - Click products to select)
+              </span>
+            )}
+          </h2>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            {/* Select Mode Toggle */}
+            {!isSelectionMode ? (
+              <button 
+                className="btn"
+                onClick={() => setIsSelectionMode(true)}
+                disabled={products.length === 0 || loading || !!roleError}
+                style={{ backgroundColor: '#2196F3', color: 'white' }}
+                title="Enter selection mode to choose products for batch actions"
+              >
+                ✓ Select Products
+              </button>
+            ) : (
+              <>
+                <button 
+                  className="btn"
+                  onClick={handleSelectAllProducts}
+                  disabled={products.length === 0 || loading || !!roleError}
+                  style={{ backgroundColor: '#2196F3', color: 'white', fontSize: '0.9rem' }}
+                  title="Select all products"
+                >
+                  ✓ Select All
+                </button>
+                {selectedProducts.size > 0 && (
+                  <>
+                    <button 
+                      className="btn"
+                      onClick={handleClearSelection}
+                      disabled={loading || !!roleError}
+                      style={{ backgroundColor: '#FF9800', color: 'white', fontSize: '0.9rem' }}
+                      title="Clear selection"
+                    >
+                      ✕ Clear ({selectedProducts.size})
+                    </button>
+                    <button 
+                      className="btn"
+                      onClick={handleDownloadQRSheet}
+                      disabled={loading || !!roleError}
+                      style={{ backgroundColor: '#4CAF50', color: 'white', fontSize: '0.9rem' }}
+                      title="Download QR sheet PDF for selected products"
+                    >
+                      📄 Download QR PDF ({selectedProducts.size})
+                    </button>
+                  </>
+                )}
+                <button 
+                  className="btn"
+                  onClick={handleCancelSelection}
+                  disabled={loading || !!roleError}
+                  style={{ backgroundColor: '#666', color: 'white', fontSize: '0.9rem' }}
+                  title="Cancel selection mode"
+                >
+                  ✕ Cancel
+                </button>
+              </>
+            )}
+            <button 
+              className="btn"
+              onClick={() => handleScanProduct('send')}
+              disabled={!isConnected}
+              style={{ backgroundColor: '#1976d2', color: 'white' }}
+            >
+              📤 Scan to Send
+            </button>
+            <button 
+              className="btn"
+              onClick={() => handleScanProduct('receive')}
+              disabled={!isConnected}
+              style={{ backgroundColor: '#4CAF50', color: 'white' }}
+            >
+              📥 Scan to Receive
+            </button>
+          </div>
+        </div>
         {loading ? (
           <div className="loading-container">
             <span className="loading"></span> Loading...
@@ -316,7 +663,44 @@ function BuyerDashboard() {
         ) : (
           <div className="product-grid">
             {products.map((product) => (
-              <div key={product.tokenId} className="product-card card">
+              <div 
+                key={product.tokenId} 
+                className="product-card card"
+                style={{
+                  position: 'relative',
+                  border: isSelectionMode && selectedProducts.has(product.tokenId.toString()) 
+                    ? '2px solid #4CAF50' 
+                    : isSelectionMode 
+                    ? '2px solid #e0e0e0' 
+                    : undefined
+                }}
+              >
+                {/* Selection checkbox - only show in selection mode */}
+                {isSelectionMode && (
+                  <div 
+                    style={{
+                      position: 'absolute',
+                      top: '10px',
+                      right: '10px',
+                      zIndex: 10
+                    }}
+                    onClick={(e) => handleToggleProductSelection(product.tokenId, e)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedProducts.has(product.tokenId.toString())}
+                      onChange={(e) => handleToggleProductSelection(product.tokenId, e)}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        width: '20px',
+                        height: '20px',
+                        cursor: 'pointer',
+                        accentColor: '#4CAF50'
+                      }}
+                      title="Select product"
+                    />
+                  </div>
+                )}
                 <div className="product-card-image-container">
                   {product.metadata?.images && product.metadata.images.length > 0 && product.metadata.images[0].url ? (
                     <img
@@ -324,8 +708,48 @@ function BuyerDashboard() {
                       alt={product.metadata?.name || `Product #${product.tokenId}`}
                       className="product-card-image"
                       onError={(e) => {
-                        e.target.style.display = 'none';
-                        e.target.parentElement.innerHTML = '<div class="product-card-no-image">📦</div>';
+                        const img = e.target;
+                        const originalUrl = img.src;
+                        
+                        // Track which gateway we've tried
+                        const triedGateways = img.dataset.triedGateways ? JSON.parse(img.dataset.triedGateways) : [];
+                        triedGateways.push(originalUrl);
+                        
+                        console.warn(`Failed to load image for product ${product.tokenId}:`, originalUrl);
+                        console.log(`Tried gateways so far:`, triedGateways);
+                        
+                        // Extract IPFS hash from URL
+                        const hashMatch = originalUrl.match(/\/ipfs\/([^\/\s?]+)/);
+                        if (hashMatch) {
+                          const hash = hashMatch[1];
+                          const allGateways = [
+                            `https://cloudflare-ipfs.com/ipfs/${hash}`,
+                            `https://ipfs.io/ipfs/${hash}`,
+                            `https://dweb.link/ipfs/${hash}`,
+                            `https://gateway.pinata.cloud/ipfs/${hash}`
+                          ];
+                          
+                          // Find the next gateway we haven't tried yet
+                          const nextGateway = allGateways.find(g => !triedGateways.includes(g));
+                          
+                          if (nextGateway) {
+                            console.log(`🔄 Trying alternative gateway: ${nextGateway}`);
+                            img.dataset.triedGateways = JSON.stringify(triedGateways);
+                            img.src = nextGateway;
+                            return; // Don't hide image yet, try next gateway
+                          }
+                        }
+                        
+                        // All gateways failed - hide image and show placeholder
+                        console.error(`❌ All gateways failed for product ${product.tokenId}`);
+                        img.style.display = 'none';
+                        const parent = img.parentElement;
+                        if (parent) {
+                          parent.innerHTML = '<div class="product-card-no-image">📦</div>';
+                        }
+                      }}
+                      onLoad={() => {
+                        console.log(`✅ Image loaded successfully for product ${product.tokenId}`);
                       }}
                     />
                   ) : (
@@ -365,8 +789,8 @@ function BuyerDashboard() {
                   </button>
                   <button
                     className="btn btn-primary"
-                    onClick={() => handleTransfer(product.tokenId)}
-                    disabled={resaleLoading === product.tokenId}
+                    onClick={(e) => handleTransfer(product.tokenId, e)}
+                    disabled={resaleLoading === product.tokenId || loading}
                   >
                     {resaleLoading === product.tokenId ? (
                       <span className="loading"></span>
@@ -380,6 +804,50 @@ function BuyerDashboard() {
           </div>
         )}
       </div>
+
+      {/* Scanner Modal */}
+      {showScanner && (
+        <Scanner
+          onScan={handleScanSuccess}
+          onError={handleScanError}
+          onClose={() => setShowScanner(false)}
+          mode="qr"
+        />
+      )}
+
+      {/* Secure Send Modal */}
+      {scannedProduct && (
+        <SecureSendModal
+          isOpen={showSendModal}
+          onClose={() => {
+            setShowSendModal(false);
+            setScannedProduct(null);
+          }}
+          product={scannedProduct}
+          provider={provider}
+          signer={signer}
+          account={account}
+          onSuccess={handleSendSuccess}
+          onError={(err) => setError(err)}
+        />
+      )}
+
+      {/* Secure Receive Modal */}
+      {scannedProduct && (
+        <SecureReceiveModal
+          isOpen={showReceiveModal}
+          onClose={() => {
+            setShowReceiveModal(false);
+            setScannedProduct(null);
+          }}
+          product={scannedProduct}
+          provider={provider}
+          signer={signer}
+          account={account}
+          onSuccess={handleReceiveSuccess}
+          onError={(err) => setError(err)}
+        />
+      )}
     </div>
   );
 }

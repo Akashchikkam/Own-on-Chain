@@ -37,11 +37,19 @@ app.get('/api/health', (req, res) => {
 import { router as countryRoutes } from './api/country.js';
 import { router as verificationRoutes } from './verification/verification-routes.js';
 import { router as productVerifyRoutes } from './api/verify.js';
+import { router as confirmationsRoutes } from './api/confirmations.js';
+import { router as qrSheetRoutes } from './api/qr-sheet.js';
+import { router as ipfsRoutes } from './api/ipfs.js';
+import { router as webhookRoutes } from './webhooks/webhook-routes.js';
 
 // Register routes
 app.use('/api/country', countryRoutes);
 app.use('/api/verify', verificationRoutes);
 app.use('/api/product', productVerifyRoutes);
+app.use('/api/confirmations', confirmationsRoutes);
+app.use('/api/qr-sheet', qrSheetRoutes);
+app.use('/api/ipfs', ipfsRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // 404 handler
 app.use((req, res) => {

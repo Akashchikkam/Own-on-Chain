@@ -3,10 +3,11 @@ import { useWeb3 } from '../context/Web3Context';
 import { Role, RoleName, VerificationStatusName } from '../contracts/config';
 import { participantRegistryService } from '../utils/contractHelpers';
 import { uploadVerificationDocument } from '../utils/ipfs';
+import { getBackendApiUrl } from '../utils/api';
 import './Register.css';
 
 // Backend API URL
-const BACKEND_API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001/api';
+const BACKEND_API_URL = getBackendApiUrl();
 
 function Register() {
   const { signer, account, isConnected, provider } = useWeb3();

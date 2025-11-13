@@ -22,6 +22,9 @@ function BatchTransferModal({
   const [transferProgress, setTransferProgress] = useState({}); // { tokenId: 'success' | 'failed' | 'pending' }
   const [error, setError] = useState('');
   const [showPreview, setShowPreview] = useState(false);
+  const [productEligibility, setProductEligibility] = useState({}); // { tokenId: { eligible, reason, status } }
+  const [checkingEligibility, setCheckingEligibility] = useState(false);
+  const [recipientRole, setRecipientRole] = useState(null);
 
   useEffect(() => {
     if (isOpen && products && products.length > 0 && provider && account) {
@@ -70,12 +73,14 @@ function BatchTransferModal({
     }
   };
 
-  const handleRecipientChange = (e) => {
+  const handleRecipientChange = async (e) => {
     const address = e.target.value.trim();
     setRecipientAddress(address);
     
     if (address === '') {
       setIsValidRecipient(false);
+      setProductEligibility({});
+      setRecipientRole(null);
       return;
     }
     
@@ -84,11 +89,137 @@ function BatchTransferModal({
     
     if (!isValid && address !== '') {
       setError('Invalid Ethereum address format');
+      setProductEligibility({});
+      setRecipientRole(null);
     } else if (address.toLowerCase() === account?.toLowerCase()) {
       setError('Cannot transfer to your own address');
       setIsValidRecipient(false);
+      setProductEligibility({});
+      setRecipientRole(null);
     } else {
       setError('');
+      // Pre-validate products when valid recipient is entered
+      if (isValid && provider && account) {
+        await checkProductEligibility(address);
+      }
+    }
+  };
+
+  const checkProductEligibility = async (recipientAddr) => {
+    if (!provider || !account || !recipientAddr) return;
+    
+    try {
+      setCheckingEligibility(true);
+      const eligibility = {};
+      
+      // Get recipient role
+      const { participantRegistryService } = await import('../utils/contractHelpers');
+      let recipientParticipant;
+      try {
+        recipientParticipant = await participantRegistryService.getParticipant(provider, recipientAddr);
+        const role = Number(recipientParticipant.role);
+        setRecipientRole(role);
+        
+        const ownedProducts = getOwnedProducts();
+        
+        for (const product of ownedProducts) {
+          try {
+            // Check if product exists in SupplyChain
+            let productData = null;
+            let productStatus = null;
+            let statusName = 'UNKNOWN';
+            
+            try {
+              productData = await supplyChainService.getProduct(provider, product.tokenId);
+              productStatus = Number(productData.status);
+              
+              const statusNames = {
+                0: 'MANUFACTURED',
+                1: 'WITH_DISTRIBUTOR',
+                2: 'WITH_RETAILER',
+                3: 'SOLD_TO_BUYER',
+                4: 'RESOLD'
+              };
+              statusName = statusNames[productStatus] || `UNKNOWN(${productStatus})`;
+            } catch (supplyChainErr) {
+              // Product doesn't exist in SupplyChain - this is OK for eligibility
+              // Products created with old contracts or direct NFT transfers might not be in SupplyChain
+              console.log(`ℹ️ Product ${product.tokenId} not in SupplyChain, allowing transfer`);
+              eligibility[product.tokenId] = {
+                eligible: true, // Allow transfers for products not in SupplyChain
+                reason: 'Eligible (not in SupplyChain - direct NFT transfer allowed)',
+                status: 'N/A (Not in SupplyChain)',
+                statusCode: null
+              };
+              continue;
+            }
+            
+            // Product exists in SupplyChain - check status eligibility
+            const statusNames = {
+              0: 'MANUFACTURED',
+              1: 'WITH_DISTRIBUTOR',
+              2: 'WITH_RETAILER',
+              3: 'SOLD_TO_BUYER',
+              4: 'RESOLD'
+            };
+            statusName = statusNames[productStatus] || `UNKNOWN(${productStatus})`;
+            
+            // Check if status is valid for recipient role
+            let isValidStatus = false;
+            let requiredStatuses = [];
+            
+            if (role === 2) { // DISTRIBUTOR
+              isValidStatus = productStatus === 0 || productStatus === 1;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR'];
+            } else if (role === 3) { // RETAILER
+              isValidStatus = productStatus === 0 || productStatus === 1 || productStatus === 2;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR', 'WITH_RETAILER'];
+            } else if (role === 4) { // BUYER
+              isValidStatus = productStatus === 0 || productStatus === 1 || productStatus === 2 || productStatus === 3;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR', 'WITH_RETAILER', 'SOLD_TO_BUYER'];
+            } else {
+              // For other roles or unregistered recipients, allow if product exists
+              isValidStatus = true;
+            }
+            
+            eligibility[product.tokenId] = {
+              eligible: isValidStatus,
+              reason: isValidStatus ? 'Eligible' : `Invalid status: ${statusName}. Required: ${requiredStatuses.join(' or ')}`,
+              status: statusName,
+              statusCode: productStatus
+            };
+          } catch (err) {
+            console.error(`Error checking eligibility for product ${product.tokenId}:`, err);
+            // On error, mark as eligible to avoid blocking transfers
+            eligibility[product.tokenId] = {
+              eligible: true,
+              reason: 'Eligible (error during check, allowing transfer)',
+              status: 'Unknown',
+              statusCode: null
+            };
+          }
+        }
+        
+        setProductEligibility(eligibility);
+        
+        const eligibleCount = Object.values(eligibility).filter(e => e.eligible).length;
+        const totalOwned = ownedProducts.length;
+        
+        if (eligibleCount === 0 && totalOwned > 0) {
+          setError(`⚠️ None of your selected products are eligible for transfer. Check product statuses below.`);
+        } else if (eligibleCount < totalOwned) {
+          setError(`⚠️ ${totalOwned - eligibleCount} product(s) are not eligible for transfer. Only ${eligibleCount} product(s) can be transferred.`);
+        }
+      } catch (err) {
+        console.error('Error checking recipient:', err);
+        setError(`Failed to verify recipient: ${err.message}`);
+        setProductEligibility({});
+        setRecipientRole(null);
+      }
+    } catch (err) {
+      console.error('Error checking product eligibility:', err);
+    } finally {
+      setCheckingEligibility(false);
     }
   };
 
@@ -151,6 +282,16 @@ function BatchTransferModal({
       console.log(`📍 ProductNFT contract: ${contractAddresses.ProductNFT}`);
       
       const stillOwnedProducts = [];
+      const filteredProducts = {
+        notOwned: [],
+        notInSupplyChain: [],
+        invalidStatus: []
+      };
+      
+      console.log(`🔍 Starting validation for ${ownedProducts.length} products...`);
+      console.log(`   Current account: ${account}`);
+      console.log(`   Recipient role: ${recipientRole} (${recipientRole === 2 ? 'DISTRIBUTOR' : recipientRole === 3 ? 'RETAILER' : recipientRole === 4 ? 'BUYER' : 'UNKNOWN'})`);
+      
       for (const product of ownedProducts) {
         try {
           setTransferProgress(prev => ({ ...prev, [product.tokenId]: 'verifying' }));
@@ -161,6 +302,10 @@ function BatchTransferModal({
           if (!ownershipResult.isOwner) {
             console.warn(`⚠️ Product ${product.tokenId} is no longer owned by ${account}. Current owner: ${ownershipResult.owner}`);
             setTransferProgress(prev => ({ ...prev, [product.tokenId]: 'failed' }));
+            filteredProducts.notOwned.push({
+              tokenId: product.tokenId,
+              currentOwner: ownershipResult.owner
+            });
             setError(`Product ${product.tokenId} is no longer owned by you. Skipping...`);
             continue;
           }
@@ -176,6 +321,58 @@ function BatchTransferModal({
               status: productData.status?.toString(),
               producer: productData.producer
             });
+            
+            // CRITICAL: Validate product status for the transfer type
+            const productStatus = Number(productData.status);
+            const statusNames = {
+              0: 'MANUFACTURED',
+              1: 'WITH_DISTRIBUTOR',
+              2: 'WITH_RETAILER',
+              3: 'SOLD_TO_BUYER',
+              4: 'RESOLD'
+            };
+            const statusName = statusNames[productStatus] || `UNKNOWN(${productStatus})`;
+            
+            console.log(`   Product ${product.tokenId} status: ${statusName} (${productStatus})`);
+            
+            // Check if status is valid for the transfer type
+            let isValidStatus = false;
+            let requiredStatuses = [];
+            
+            // recipientRole is a number: 2=DISTRIBUTOR, 3=RETAILER, 4=BUYER
+            if (recipientRole === 2) { // Role.DISTRIBUTOR
+              // For distributor transfer: only MANUFACTURED (0) or WITH_DISTRIBUTOR (1) allowed
+              isValidStatus = productStatus === 0 || productStatus === 1;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR'];
+            } else if (recipientRole === 3) { // Role.RETAILER
+              // For retailer transfer: MANUFACTURED (0), WITH_DISTRIBUTOR (1), or WITH_RETAILER (2) allowed
+              isValidStatus = productStatus === 0 || productStatus === 1 || productStatus === 2;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR', 'WITH_RETAILER'];
+            } else if (recipientRole === 4) { // Role.BUYER
+              // For buyer sale: MANUFACTURED (0), WITH_DISTRIBUTOR (1), WITH_RETAILER (2), or SOLD_TO_BUYER (3) allowed
+              isValidStatus = productStatus === 0 || productStatus === 1 || productStatus === 2 || productStatus === 3;
+              requiredStatuses = ['MANUFACTURED', 'WITH_DISTRIBUTOR', 'WITH_RETAILER', 'SOLD_TO_BUYER'];
+            } else {
+              // Default: allow all statuses for other roles
+              isValidStatus = true;
+            }
+            
+            if (!isValidStatus) {
+              console.error(`❌ Product ${product.tokenId} has invalid status for ${recipientRole} transfer`);
+              console.error(`   Current status: ${statusName} (${productStatus})`);
+              console.error(`   Required statuses: ${requiredStatuses.join(', ')}`);
+              console.error(`   This product cannot be transferred to ${recipientRole} in its current state.`);
+              setTransferProgress(prev => ({ ...prev, [product.tokenId]: 'failed' }));
+              filteredProducts.invalidStatus.push({
+                tokenId: product.tokenId,
+                currentStatus: statusName,
+                requiredStatuses: requiredStatuses
+              });
+              setError(`Product ${product.tokenId} has invalid status (${statusName}) for ${recipientRole} transfer. Required: ${requiredStatuses.join(' or ')}.`);
+              continue;
+            }
+            
+            console.log(`✅ Product ${product.tokenId} status validated: ${statusName} is valid for ${recipientRole} transfer`);
           } catch (supplyChainErr) {
             if (supplyChainErr.message && supplyChainErr.message.includes('Product does not exist')) {
               console.error(`❌ Product ${product.tokenId} does NOT exist in SupplyChain contract`);
@@ -187,6 +384,9 @@ function BatchTransferModal({
               console.error(`   3. Product was created directly in ProductNFT (shouldn't be possible)`);
               console.error(`   Only products created through SupplyChain.createProduct() can be batch transferred.`);
               setTransferProgress(prev => ({ ...prev, [product.tokenId]: 'failed' }));
+              filteredProducts.notInSupplyChain.push({
+                tokenId: product.tokenId
+              });
               setError(`Product ${product.tokenId} is not registered in SupplyChain contract at ${contractAddresses.SupplyChain}. Cannot batch transfer.`);
               continue;
             }
@@ -203,26 +403,100 @@ function BatchTransferModal({
         }
       }
       
+      // Log summary
+      console.log(`\n📊 Validation Summary:`);
+      console.log(`   Total products checked: ${ownedProducts.length}`);
+      console.log(`   ✅ Valid products: ${stillOwnedProducts.length}`);
+      console.log(`   ❌ Filtered out: ${ownedProducts.length - stillOwnedProducts.length}`);
+      if (filteredProducts.notOwned.length > 0) {
+        console.log(`      - Not owned: ${filteredProducts.notOwned.length} products`);
+        filteredProducts.notOwned.forEach(p => console.log(`        • Product ${p.tokenId}: owned by ${p.currentOwner}`));
+      }
+      if (filteredProducts.notInSupplyChain.length > 0) {
+        console.log(`      - Not in SupplyChain: ${filteredProducts.notInSupplyChain.length} products`);
+        filteredProducts.notInSupplyChain.forEach(p => console.log(`        • Product ${p.tokenId}`));
+      }
+      if (filteredProducts.invalidStatus.length > 0) {
+        console.log(`      - Invalid status: ${filteredProducts.invalidStatus.length} products`);
+        filteredProducts.invalidStatus.forEach(p => console.log(`        • Product ${p.tokenId}: ${p.currentStatus}, required: ${p.requiredStatuses.join(' or ')}`));
+      }
+      console.log(`\n`);
+      
       if (stillOwnedProducts.length === 0) {
-        const errorMsg = `No valid products found for batch transfer. All products either:
-- Are not owned by you
-- Do not exist in SupplyChain contract at ${contractAddresses.SupplyChain}
+        const roleName = recipientRole === 2 ? 'distributor' : recipientRole === 3 ? 'retailer' : recipientRole === 4 ? 'buyer' : 'recipient';
+        const requiredStatuses = recipientRole === 2 
+          ? 'MANUFACTURED or WITH_DISTRIBUTOR'
+          : recipientRole === 3
+          ? 'MANUFACTURED, WITH_DISTRIBUTOR, or WITH_RETAILER'
+          : recipientRole === 4
+          ? 'MANUFACTURED, WITH_DISTRIBUTOR, WITH_RETAILER, or SOLD_TO_BUYER'
+          : 'any valid status';
+        
+        // Build detailed error message
+        let errorDetails = [];
+        if (filteredProducts.notOwned.length > 0) {
+          errorDetails.push(`\n❌ ${filteredProducts.notOwned.length} product(s) not owned by you:`);
+          filteredProducts.notOwned.forEach(p => {
+            errorDetails.push(`   - Product ${p.tokenId}: owned by ${p.currentOwner}`);
+          });
+        }
+        if (filteredProducts.notInSupplyChain.length > 0) {
+          errorDetails.push(`\n❌ ${filteredProducts.notInSupplyChain.length} product(s) not in SupplyChain:`);
+          filteredProducts.notInSupplyChain.forEach(p => {
+            errorDetails.push(`   - Product ${p.tokenId}: not registered in SupplyChain`);
+          });
+        }
+        if (filteredProducts.invalidStatus.length > 0) {
+          errorDetails.push(`\n❌ ${filteredProducts.invalidStatus.length} product(s) with invalid status:`);
+          filteredProducts.invalidStatus.forEach(p => {
+            errorDetails.push(`   - Product ${p.tokenId}: status ${p.currentStatus}, required: ${p.requiredStatuses.join(' or ')}`);
+          });
+        }
+        
+        const errorMsg = `No valid products found for batch transfer to ${roleName}.${errorDetails.join('\n')}
 
-🔍 IMPORTANT: Products created before the new SupplyChain contract deployment (${contractAddresses.SupplyChain}) cannot be batch transferred.
+📊 Summary:
+- Total products checked: ${ownedProducts.length}
+- Products passed validation: ${stillOwnedProducts.length}
+- Products filtered out: ${ownedProducts.length - stillOwnedProducts.length}
 
-✅ Solution: Only products created AFTER the new contract deployment can be batch transferred. Please create new products or use products that were created after the contract was redeployed.`;
+🔍 Check the browser console for detailed validation logs for each product.
+
+✅ Solution: Select products that:
+1. Are owned by you (current account: ${account})
+2. Exist in SupplyChain contract at ${contractAddresses.SupplyChain}
+3. Have status: ${requiredStatuses}`;
         throw new Error(errorMsg);
       }
       
       console.log(`✅ ${stillOwnedProducts.length} products verified and ready for transfer`);
       
+      // Filter products based on pre-validation eligibility if available
+      let productsToTransfer = stillOwnedProducts;
+      if (Object.keys(productEligibility).length > 0) {
+        productsToTransfer = stillOwnedProducts.filter(p => {
+          const eligibility = productEligibility[p.tokenId];
+          return eligibility && eligibility.eligible;
+        });
+        
+        if (productsToTransfer.length < stillOwnedProducts.length) {
+          console.log(`⚠️ Filtered ${stillOwnedProducts.length - productsToTransfer.length} products based on pre-validation`);
+          console.log(`   Eligible products: ${productsToTransfer.map(p => p.tokenId).join(', ')}`);
+        }
+      }
+      
+      if (productsToTransfer.length === 0) {
+        const roleName = recipientRole === 2 ? 'distributor' : recipientRole === 3 ? 'retailer' : recipientRole === 4 ? 'buyer' : 'recipient';
+        throw new Error(`No eligible products found for batch transfer to ${roleName}. Please check product statuses above.`);
+      }
+      
       // Use batch transfer function for single signature
-      const tokenIds = stillOwnedProducts.map(p => p.tokenId);
-      const saleDetails = `Batch transfer - ${stillOwnedProducts.length} products`;
+      const tokenIds = productsToTransfer.map(p => p.tokenId);
+      const saleDetails = `Batch transfer - ${productsToTransfer.length} products`;
       
       setTransferProgress(prev => {
         const updated = { ...prev };
-        stillOwnedProducts.forEach(p => {
+        productsToTransfer.forEach(p => {
           updated[p.tokenId] = 'preparing';
         });
         return updated;
@@ -237,11 +511,12 @@ function BatchTransferModal({
         console.log(`⚠️ IMPORTANT: This should create ONE transaction requiring ONE MetaMask signature`);
         
         // Use appropriate batch SupplyChain method based on recipient role
-        if (recipientRole === Role.DISTRIBUTOR) {
+        // recipientRole is a number: 2=DISTRIBUTOR, 3=RETAILER, 4=BUYER
+        if (recipientRole === 2) { // Role.DISTRIBUTOR
           tx = await supplyChainService.batchTransferToDistributor(signer, tokenIds, recipientAddress, false);
-        } else if (recipientRole === Role.RETAILER) {
+        } else if (recipientRole === 3) { // Role.RETAILER
           tx = await supplyChainService.batchTransferToRetailer(signer, tokenIds, recipientAddress, false);
-        } else if (recipientRole === Role.BUYER) {
+        } else if (recipientRole === 4) { // Role.BUYER
           tx = await supplyChainService.batchSellToBuyer(signer, tokenIds, recipientAddress, saleDetails, false);
         } else {
           // Fallback to batch sell to buyer for other roles
@@ -269,7 +544,7 @@ function BatchTransferModal({
           err.message.includes('does not exist on contract')
         )) {
           // Batch function doesn't exist
-          setError(`❌ Batch functions not available on deployed contract. You'll need to sign ${tokenIds.length} transactions. Please redeploy the SupplyChain contract with batch functions for single-signature batch transfers.`);
+          setError(`❌ Batch functions not available on deployed contract. You'll need to sign ${productsToTransfer.length} transactions. Please redeploy the SupplyChain contract with batch functions for single-signature batch transfers.`);
           setTransferring(false);
           return;
         }
@@ -277,7 +552,7 @@ function BatchTransferModal({
         // Update all products to failed
         setTransferProgress(prev => {
           const updated = { ...prev };
-          stillOwnedProducts.forEach(p => {
+          productsToTransfer.forEach(p => {
             updated[p.tokenId] = 'failed';
           });
           return updated;
@@ -307,14 +582,14 @@ function BatchTransferModal({
         // All products transferred successfully
         setTransferProgress(prev => {
           const updated = { ...prev };
-          stillOwnedProducts.forEach(p => {
+          productsToTransfer.forEach(p => {
             updated[p.tokenId] = 'success';
           });
           return updated;
         });
         
         if (onSuccess) {
-          onSuccess(`${stillOwnedProducts.length} product(s) transferred successfully!`);
+          onSuccess(`${productsToTransfer.length} product(s) transferred successfully!`);
         }
         
         handleClose();
@@ -322,7 +597,7 @@ function BatchTransferModal({
         console.error('Error waiting for transaction confirmation:', waitErr);
         setTransferProgress(prev => {
           const updated = { ...prev };
-          stillOwnedProducts.forEach(p => {
+          productsToTransfer.forEach(p => {
             updated[p.tokenId] = 'failed';
           });
           return updated;
@@ -345,12 +620,14 @@ function BatchTransferModal({
   };
 
   const handleClose = () => {
-    setRecipientAddress('');
-    setError('');
-    setShowPreview(false);
-    setOwnershipStatus({});
-    setTransferProgress({});
-    onClose();
+      setRecipientAddress('');
+      setError('');
+      setShowPreview(false);
+      setOwnershipStatus({});
+      setTransferProgress({});
+      setProductEligibility({});
+      setRecipientRole(null);
+      onClose();
   };
 
   if (!isOpen) return null;
@@ -373,13 +650,26 @@ function BatchTransferModal({
               {products.map((product) => {
                 const status = ownershipStatus[product.tokenId];
                 const progress = transferProgress[product.tokenId];
+                const eligibility = productEligibility[product.tokenId];
                 const productName = product.metadata?.name || `Product #${product.tokenId}`;
                 
                 return (
-                  <div key={product.tokenId} className="batch-product-item">
+                  <div 
+                    key={product.tokenId} 
+                    className="batch-product-item"
+                    style={{
+                      opacity: eligibility && !eligibility.eligible ? 0.6 : 1,
+                      borderLeft: eligibility && !eligibility.eligible ? '3px solid #ff9800' : eligibility && eligibility.eligible ? '3px solid #4CAF50' : undefined
+                    }}
+                  >
                     <div className="product-item-info">
                       <span className="product-name">{productName}</span>
                       <span className="product-token-id">Token ID: {product.tokenId}</span>
+                      {eligibility && (
+                        <span style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem', display: 'block' }}>
+                          Status: {eligibility.status}
+                        </span>
+                      )}
                     </div>
                     <div className="product-item-status">
                       {checkingOwnership ? (
@@ -393,6 +683,18 @@ function BatchTransferModal({
                       ) : (
                         <span className="status-unknown">?</span>
                       )}
+                      {checkingEligibility && status?.isOwner && (
+                        <span className="status-checking" style={{ marginLeft: '0.5rem' }}>Checking eligibility...</span>
+                      )}
+                      {eligibility && status?.isOwner && (
+                        eligibility.eligible ? (
+                          <span className="status-owner" style={{ marginLeft: '0.5rem' }}>✓ Eligible</span>
+                        ) : (
+                          <span className="status-not-owner" style={{ marginLeft: '0.5rem', fontSize: '0.85rem' }} title={eligibility.reason}>
+                            ✗ {eligibility.reason.substring(0, 30)}...
+                          </span>
+                        )
+                      )}
                       {progress === 'verifying' && <span className="status-verifying">Verifying...</span>}
                       {progress === 'transferring' && <span className="status-transferring">Transferring...</span>}
                       {progress === 'success' && <span className="status-success">✓ Transferred</span>}
@@ -405,6 +707,11 @@ function BatchTransferModal({
             </div>
             <div className="owned-count">
               {ownedProducts.length} of {products.length} products owned by you
+              {recipientRole !== null && Object.keys(productEligibility).length > 0 && (
+                <span style={{ marginLeft: '1rem', color: '#4CAF50' }}>
+                  • {Object.values(productEligibility).filter(e => e.eligible).length} eligible for transfer
+                </span>
+              )}
             </div>
           </div>
 
@@ -437,9 +744,9 @@ function BatchTransferModal({
                 <button
                   className="btn btn-primary"
                   onClick={handlePreview}
-                  disabled={!isValidRecipient || transferring || ownedProducts.length === 0}
+                  disabled={!isValidRecipient || transferring || ownedProducts.length === 0 || checkingEligibility || (Object.keys(productEligibility).length > 0 && Object.values(productEligibility).filter(e => e.eligible).length === 0)}
                 >
-                  Preview Transfer
+                  {checkingEligibility ? 'Checking Eligibility...' : 'Preview Transfer'}
                 </button>
               </div>
             </>
@@ -461,12 +768,16 @@ function BatchTransferModal({
                   </div>
                   <div className="preview-item">
                     <span className="preview-label">Products:</span>
-                    <span className="preview-value">{ownedProducts.length} product(s)</span>
+                    <span className="preview-value">
+                      {Object.keys(productEligibility).length > 0 
+                        ? `${Object.values(productEligibility).filter(e => e.eligible).length} eligible product(s)` 
+                        : `${ownedProducts.length} product(s)`}
+                    </span>
                   </div>
                 </div>
-                {ownedProducts.length > 1 && (
+                {(Object.keys(productEligibility).length > 0 ? Object.values(productEligibility).filter(e => e.eligible).length : ownedProducts.length) > 1 && (
                   <div className="preview-info" style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: '#e3f2fd', borderRadius: '4px', fontSize: '0.9rem', color: '#000000' }}>
-                    ✅ <strong>Batch Transfer:</strong> All {ownedProducts.length} products will be transferred in a single transaction requiring 1 signature.
+                    ✅ <strong>Batch Transfer:</strong> All {Object.keys(productEligibility).length > 0 ? Object.values(productEligibility).filter(e => e.eligible).length : ownedProducts.length} products will be transferred in a single transaction requiring 1 signature.
                   </div>
                 )}
               </div>
@@ -484,14 +795,14 @@ function BatchTransferModal({
                 <button
                   className="btn btn-primary"
                   onClick={handleConfirmTransfer}
-                  disabled={!isValidRecipient || transferring || ownedProducts.length === 0}
+                  disabled={!isValidRecipient || transferring || ownedProducts.length === 0 || checkingEligibility || (Object.keys(productEligibility).length > 0 && Object.values(productEligibility).filter(e => e.eligible).length === 0)}
                 >
                   {transferring ? (
                     <>
                       <span className="loading"></span> Transferring...
                     </>
                   ) : (
-                    `Transfer ${ownedProducts.length} Product(s)`
+                    `Transfer ${Object.keys(productEligibility).length > 0 ? Object.values(productEligibility).filter(e => e.eligible).length : ownedProducts.length} Product(s)`
                   )}
                 </button>
               </div>

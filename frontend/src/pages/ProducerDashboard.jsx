@@ -1,13 +1,19 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWeb3 } from '../context/Web3Context';
 import { supplyChainService, productNFTService } from '../utils/contractHelpers';
+import { productIdentifierService } from '../utils/productIdentifier';
+import { gtinLinkerService } from '../utils/gtinLinker';
 import { uploadProductMetadata, uploadFileToIPFS, retrieveFromIPFS, ipfsToGatewayUrl, deleteFromIPFS } from '../utils/ipfs';
 import { downloadProductQR } from '../utils/qr-generator';
+import { getBackendApiUrl } from '../utils/api';
+import { verifyOwnership } from '../utils/securityHelpers';
+import { createProductsFromTemplate } from '../utils/batchProductCreator';
 import { useNavigate } from 'react-router-dom';
 import Scanner from '../components/Scanner';
 import SecureSendModal from '../components/SecureSendModal';
 import SecureReceiveModal from '../components/SecureReceiveModal';
 import BatchTransferModal from '../components/BatchTransferModal';
+import WebhookManager from '../components/WebhookManager';
 import './Dashboard.css';
 
 function ProducerDashboard() {
@@ -16,6 +22,19 @@ function ProducerDashboard() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [showBatchCreate, setShowBatchCreate] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({});
+  const [batchCreating, setBatchCreating] = useState(false);
+  
+  // Module availability
+  const [hasProductIdentifier, setHasProductIdentifier] = useState(false);
+  const [hasGtinLinker, setHasGtinLinker] = useState(false);
+  
+  // Product identifiers state
+  const [productBlockchainIds, setProductBlockchainIds] = useState({});
+  const [productGtins, setProductGtins] = useState({});
+  const [linkingGtin, setLinkingGtin] = useState(null);
+  const [gtinInputs, setGtinInputs] = useState({});
   
   // Scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -30,6 +49,21 @@ function ProducerDashboard() {
   const scannedTokenIdsRef = useRef(new Set()); // Use ref for synchronous duplicate checking
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [scanFeedback, setScanFeedback] = useState(null); // For showing product name after scan
+  const [showWebhookManager, setShowWebhookManager] = useState(false);
+  
+  // Debug: Track webhook manager state
+  useEffect(() => {
+    if (showWebhookManager) {
+      console.log('Webhook Manager opened, account:', account);
+      // Scroll to webhook manager after a short delay to ensure it's rendered
+      setTimeout(() => {
+        const webhookElement = document.querySelector('.webhook-manager');
+        if (webhookElement) {
+          webhookElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 100);
+    }
+  }, [showWebhookManager, account]);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -86,36 +120,110 @@ function ProducerDashboard() {
     }
   }, [isConnected, account, provider]);
 
+  // Check if modules are available
+  const checkModuleAvailability = async () => {
+    if (!provider) return;
+    try {
+      const hasPI = await productIdentifierService.isAvailable(provider);
+      const hasGL = await gtinLinkerService.isAvailable(provider);
+      setHasProductIdentifier(hasPI);
+      setHasGtinLinker(hasGL);
+      console.log('📦 Module availability:', { ProductIdentifier: hasPI, GtinLinker: hasGL });
+    } catch (err) {
+      console.warn('⚠️ Error checking module availability:', err);
+    }
+  };
+
+  // Load blockchain IDs and GTINs for products
+  useEffect(() => {
+    if (products.length > 0 && provider && (hasProductIdentifier || hasGtinLinker)) {
+      loadProductIdentifiers();
+    }
+  }, [products, provider, hasProductIdentifier, hasGtinLinker]);
+
+  const loadProductIdentifiers = async () => {
+    if (!provider) return;
+    
+    const blockchainIds = {};
+    const gtins = {};
+    
+    for (const product of products) {
+      const tokenId = product.tokenId;
+      
+      // Load blockchain ID
+      if (hasProductIdentifier) {
+        try {
+          const blockchainId = await productIdentifierService.getBlockchainId(provider, tokenId);
+          if (blockchainId) {
+            blockchainIds[tokenId] = blockchainId;
+          }
+        } catch (err) {
+          // Product may not have blockchain ID registered yet
+        }
+      }
+      
+      // Load GTIN
+      if (hasGtinLinker) {
+        try {
+          const gtin = await gtinLinkerService.getGtinByTokenId(provider, tokenId);
+          if (gtin) {
+            gtins[tokenId] = gtin;
+          }
+        } catch (err) {
+          // Product may not have GTIN linked yet
+        }
+      }
+    }
+    
+    setProductBlockchainIds(blockchainIds);
+    setProductGtins(gtins);
+  };
+
   const checkProducerRole = async () => {
     if (!provider || !account) return;
     
     try {
       setCheckingRole(true);
+      console.log('🔍 Checking Producer role for:', account);
       const { participantRegistryService } = await import('../utils/contractHelpers');
       const { Role } = await import('../contracts/config');
       
+      // First check if participant exists
+      let participant;
+      try {
+        participant = await participantRegistryService.getParticipant(provider, account);
+        console.log('📋 Participant data:', {
+          role: participant.role.toString(),
+          status: participant.status.toString(),
+          isActive: participant.isActive
+        });
+      } catch (err) {
+        console.error('❌ Error getting participant:', err);
+        setRoleError(`❌ This account is not registered. Please register as Producer first.`);
+        setCheckingRole(false);
+        return;
+      }
+      
       const hasProducerRole = await participantRegistryService.hasRole(provider, account, Role.PRODUCER);
+      console.log('✅ hasRole(Producer):', hasProducerRole);
       
       if (!hasProducerRole) {
         // Check what role they actually have
-        try {
-          const participant = await participantRegistryService.getParticipant(provider, account);
-          const { RoleName } = await import('../contracts/config');
-          const currentRole = RoleName[Number(participant.role)] || 'Unknown';
-          
-          if (Number(participant.role) === Role.PRODUCER && Number(participant.status) !== 1) {
-            setRoleError(`⚠️ Your account is registered as Producer but NOT VERIFIED yet. Please wait for admin verification.`);
-          } else {
-            setRoleError(`❌ You are registered as ${currentRole}, not Producer. Switch to Producer account (Account #1) to create products.`);
-          }
-        } catch (err) {
-          setRoleError(`❌ This account is not registered as Producer. Please register as Producer or switch to Producer account (Account #1).`);
+        const { RoleName } = await import('../contracts/config');
+        const currentRole = RoleName[Number(participant.role)] || 'Unknown';
+        
+        if (Number(participant.role) === Role.PRODUCER && Number(participant.status) !== 1) {
+          setRoleError(`⚠️ Your account is registered as Producer but NOT VERIFIED yet. Please wait for admin verification.`);
+        } else {
+          setRoleError(`❌ You are registered as ${currentRole}, not Producer. Switch to Producer account (Account #1) to create products.`);
         }
       } else {
         setRoleError('');
+        console.log('✅ Account is verified Producer');
       }
     } catch (err) {
-      console.error('Error checking role:', err);
+      console.error('❌ Error checking role:', err);
+      setRoleError(`❌ Error checking role: ${err.message}`);
     } finally {
       setCheckingRole(false);
     }
@@ -129,6 +237,7 @@ function ProducerDashboard() {
     
     const currentAccount = account;
     setLoading(true);
+    setError('');
     console.log('🔍 Loading products for Producer:', currentAccount);
     
     // CRITICAL: Only load products if user is verified Producer
@@ -136,15 +245,21 @@ function ProducerDashboard() {
     try {
       const { participantRegistryService } = await import('../utils/contractHelpers');
       const { Role } = await import('../contracts/config');
+      console.log('🔍 Checking Producer role before loading products...');
       const hasProducerRole = await participantRegistryService.hasRole(provider, currentAccount, Role.PRODUCER);
+      console.log('✅ hasProducerRole:', hasProducerRole);
+      
       if (!hasProducerRole) {
         console.log('⚠️ Not a verified Producer - skipping product load');
+        // Don't set error here, role check already shows error message
         setProducts([]);
         setLoading(false);
         return;
       }
     } catch (roleCheckErr) {
-      console.warn('⚠️ Could not verify Producer role - skipping product load:', roleCheckErr);
+      console.error('❌ Error verifying Producer role:', roleCheckErr);
+      console.warn('⚠️ Could not verify Producer role - skipping product load');
+      setError(`Failed to verify Producer role: ${roleCheckErr.message}`);
       setProducts([]);
       setLoading(false);
       return;
@@ -152,7 +267,18 @@ function ProducerDashboard() {
     
     try {
       const BURN_ADDRESS = '0x000000000000000000000000000000000000dEaD';
+      console.log('🔍 Getting tokens owned by:', currentAccount);
       const tokenIds = await productNFTService.getTokensByOwner(provider, currentAccount);
+      console.log('📦 Found token IDs:', tokenIds.map(id => id.toString()));
+      console.log('📦 Total tokens found:', tokenIds.length);
+      
+      if (tokenIds.length === 0) {
+        console.log('⚠️ No tokens found for this account');
+        setProducts([]);
+        setLoading(false);
+        return;
+      }
+      
       const productsData = await Promise.all(
         tokenIds.map(async (tokenId) => {
           const info = await productNFTService.getProductInfo(provider, tokenId);
@@ -367,16 +493,16 @@ function ProducerDashboard() {
       const baseUrl = window.location.origin;
 
       // Call backend to generate PDF
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-      // Ensure backendUrl doesn't end with /api (we'll add it)
-      const baseBackendUrl = backendUrl.replace(/\/api$/, '');
-      
       // Create AbortController for timeout
+      // Increase timeout based on number of products (30 seconds per product, min 60s, max 10 minutes)
+      const timeoutDuration = Math.min(Math.max(productsToDownload.length * 30000, 60000), 600000);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute timeout
+      const timeoutId = setTimeout(() => controller.abort(), timeoutDuration);
+      
+      console.log(`⏳ Generating QR PDF for ${productsToDownload.length} products (timeout: ${timeoutDuration/1000}s)...`);
       
       try {
-        const response = await fetch(`${baseBackendUrl}/api/qr-sheet/generate`, {
+        const response = await fetch(getBackendApiUrl('/qr-sheet/generate'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -440,7 +566,8 @@ function ProducerDashboard() {
       } catch (fetchError) {
         clearTimeout(timeoutId);
         if (fetchError.name === 'AbortError') {
-          throw new Error('Request timed out. Please try again with fewer products.');
+          const maxProducts = Math.floor(timeoutDuration / 30000);
+          throw new Error(`Request timed out after ${timeoutDuration/1000}s. Try selecting fewer products (max ${maxProducts} recommended).`);
         }
         throw fetchError;
       }
@@ -586,9 +713,9 @@ function ProducerDashboard() {
       } else if (result.productId) {
         // Try backend lookup for product ID + serial
         try {
-          const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-          const baseBackendUrl = backendUrl.replace(/\/api$/, '');
-          const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(result.productId)}/${encodeURIComponent(result.serialNumber || '')}`);
+          const lookupResponse = await fetch(
+            getBackendApiUrl(`/product/lookup/${encodeURIComponent(result.productId)}/${encodeURIComponent(result.serialNumber || '')}`)
+          );
           
           if (lookupResponse.ok) {
             const lookupResult = await lookupResponse.json();
@@ -615,9 +742,9 @@ function ProducerDashboard() {
           const serial = result.url.searchParams.get('serial');
           if (productId && serial) {
             try {
-              const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-              const baseBackendUrl = backendUrl.replace(/\/api$/, '');
-              const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`);
+              const lookupResponse = await fetch(
+                getBackendApiUrl(`/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`)
+              );
               
               if (lookupResponse.ok) {
                 const lookupResult = await lookupResponse.json();
@@ -640,10 +767,10 @@ function ProducerDashboard() {
             const productId = url.searchParams.get('id');
             const serial = url.searchParams.get('serial');
             if (productId && serial) {
-              try {
-                const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-                const baseBackendUrl = backendUrl.replace(/\/api$/, '');
-                const lookupResponse = await fetch(`${baseBackendUrl}/api/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`);
+            try {
+              const lookupResponse = await fetch(
+                getBackendApiUrl(`/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`)
+              );
                 
                 if (lookupResponse.ok) {
                   const lookupResult = await lookupResponse.json();
@@ -825,7 +952,41 @@ function ProducerDashboard() {
     setError('Failed to scan. Please try again.');
   };
 
-  const handleSendSuccess = (message) => {
+  const handleSendSuccess = async (message, transferData = null) => {
+    // Trigger webhook for product transfer if transfer data is provided
+    // Only notify the SENDER (privacy: producer doesn't see distributor/retailer transfers)
+    if (transferData && transferData.tokenId && transferData.to) {
+      try {
+        const webhookData = {
+          tokenId: transferData.tokenId.toString(),
+          from: account,
+          to: transferData.to,
+          transferType: transferData.transferType || 'transfer',
+          productName: transferData.productName || `Product #${transferData.tokenId}`
+        };
+
+        const webhookResponse = await fetch(getBackendApiUrl('/webhooks/trigger'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            event: 'product.transferred',
+            data: webhookData,
+            walletAddress: account // Only notify the sender
+          })
+        });
+
+        if (webhookResponse.ok) {
+          const webhookResult = await webhookResponse.json();
+          console.log('✅ Transfer webhook triggered:', webhookResult);
+        } else {
+          console.warn('⚠️ Transfer webhook trigger failed (non-critical)');
+        }
+      } catch (webhookErr) {
+        console.warn('⚠️ Transfer webhook trigger error (non-critical):', webhookErr);
+      }
+    }
     setSuccess(message);
     setScannedProduct(null);
     setShowSendModal(false);
@@ -842,7 +1003,9 @@ function ProducerDashboard() {
   };
 
   const handleDelete = async (tokenId, e) => {
-    e.stopPropagation(); // Prevent card click
+    if (e) {
+      e.stopPropagation(); // Prevent card click
+    }
     
     const confirmed = window.confirm(
       '⚠️ WARNING: This will permanently BURN this NFT and delete its metadata!\n\n' +
@@ -859,34 +1022,181 @@ function ProducerDashboard() {
 
       console.log('🔥 Starting product deletion for token:', tokenId);
 
-      // Step 1: Get tokenURI (metadata hash) before burning
-      const tokenURI = await productNFTService.getTokenURI(provider, tokenId);
-      console.log('📎 Token URI to delete:', tokenURI);
+      // Step 1: Verify ownership before attempting deletion
+      const ownershipResult = await verifyOwnership(provider, tokenId, account);
+      if (!ownershipResult.isOwner) {
+        throw new Error(`You are not the owner of product #${tokenId}. Current owner: ${ownershipResult.owner}`);
+      }
 
-      // Step 2: Burn NFT (transfer to burn address)
+      // Step 2: Get tokenURI (metadata hash) before burning
+      let tokenURI = null;
+      try {
+        tokenURI = await productNFTService.getTokenURI(provider, tokenId);
+        console.log('📎 Token URI to delete:', tokenURI);
+      } catch (uriErr) {
+        console.warn('⚠️ Could not get token URI:', uriErr.message);
+        // Continue with deletion even if URI retrieval fails
+      }
+
+      // Step 3: Check if product exists in SupplyChain and get current owner from there
+      let supplyChainOwner = null;
+      try {
+        const productData = await supplyChainService.getProduct(provider, tokenId);
+        supplyChainOwner = productData.currentOwner?.toLowerCase();
+        console.log('📋 Product exists in SupplyChain. Current owner:', supplyChainOwner);
+        console.log('📋 Your address:', account?.toLowerCase());
+        
+        // If SupplyChain says owner is different, that's the issue
+        if (supplyChainOwner && supplyChainOwner !== account?.toLowerCase()) {
+          throw new Error(`Product ownership mismatch. SupplyChain owner: ${supplyChainOwner}, Your address: ${account}. The product may have been transferred through SupplyChain.`);
+        }
+      } catch (supplyChainErr) {
+        if (supplyChainErr.message?.includes('ownership mismatch')) {
+          throw supplyChainErr;
+        }
+        // Product doesn't exist in SupplyChain - that's OK, we can still burn the NFT
+        console.log('ℹ️ Product not in SupplyChain, proceeding with direct NFT burn');
+      }
+
+      // Step 4: Burn NFT (transfer to burn address)
       const BURN_ADDRESS = '0x000000000000000000000000000000000000dEaD';
       console.log('🔥 Burning NFT to:', BURN_ADDRESS);
-      await productNFTService.transferTo(signer, tokenId, BURN_ADDRESS);
-      console.log('✅ NFT burned successfully');
-
-      // Step 3: Delete metadata from IPFS
-      if (tokenURI && tokenURI !== '') {
-        console.log('🗑️ Deleting metadata from IPFS...');
-        const deleteResult = await deleteFromIPFS(tokenURI);
-        if (deleteResult.success) {
-          console.log('✅ Metadata deleted successfully');
+      
+      try {
+        // Use direct transferFrom - ProductNFT allows direct transfers
+        const { getProductNFTContract } = await import('../utils/contractHelpers');
+        const contract = await getProductNFTContract(signer);
+        const fromAddress = await signer.getAddress();
+        
+        console.log('📋 Transferring from:', fromAddress);
+        console.log('📋 Transferring to:', BURN_ADDRESS);
+        console.log('📋 Token ID:', tokenId);
+        
+        const tx = await contract.transferFrom(fromAddress, BURN_ADDRESS, tokenId);
+        console.log('✅ Burn transaction sent:', tx.hash);
+        
+        // Wait for confirmation
+        await tx.wait();
+        console.log('✅ NFT burned successfully. Transaction confirmed:', tx.hash);
+      } catch (transferErr) {
+        console.error('❌ Failed to burn NFT:', transferErr);
+        console.error('   Error code:', transferErr.code);
+        console.error('   Error message:', transferErr.message);
+        console.error('   Error data:', transferErr.data);
+        console.error('   Full error:', transferErr);
+        
+        // Decode the revert reason if available
+        let errorMessage = transferErr.message || 'Unknown error';
+        if (transferErr.reason) {
+          errorMessage = transferErr.reason;
+        } else if (transferErr.data && typeof transferErr.data === 'string') {
+          // Try to decode error
+          try {
+            const { getProductNFTContract } = await import('../utils/contractHelpers');
+            const contract = await getProductNFTContract(provider);
+            const decoded = contract.interface.parseError(transferErr.data);
+            if (decoded) {
+              errorMessage = decoded.name || decoded.args?.[0] || errorMessage;
+            }
+          } catch (decodeErr) {
+            // Use original message
+          }
+        }
+        
+        // Provide specific error messages
+        if (errorMessage.includes('ERC721: transfer caller is not owner') || 
+            errorMessage.includes('transfer caller is not owner') ||
+            errorMessage.includes('caller is not token owner')) {
+          throw new Error('You are not the owner of this product. Cannot delete.');
+        } else if (errorMessage.includes('ERC721: invalid token ID') || 
+                   errorMessage.includes('invalid token ID')) {
+          throw new Error('Product does not exist or has already been burned.');
+        } else if (errorMessage.includes('user rejected') || 
+                   errorMessage.includes('User denied')) {
+          throw new Error('Transaction was cancelled. Product not deleted.');
+        } else if (errorMessage.includes('execution reverted')) {
+          throw new Error(`Transaction reverted: ${errorMessage}. Check console for details.`);
         } else {
-          console.warn('⚠️ Failed to delete metadata:', deleteResult.error);
+          throw new Error(`Failed to burn NFT: ${errorMessage}`);
         }
       }
 
-      setSuccess(`Product #${tokenId} burned and metadata deleted successfully!`);
+      // Step 5: Delete metadata from IPFS (non-blocking - don't fail if this fails)
+      if (tokenURI && tokenURI !== '') {
+        console.log('🗑️ Deleting metadata from IPFS...');
+        try {
+          const deleteResult = await deleteFromIPFS(tokenURI);
+          if (deleteResult.success) {
+            console.log('✅ Metadata deleted successfully');
+          } else {
+            console.warn('⚠️ Failed to delete metadata from IPFS:', deleteResult.error);
+            // Don't throw error - NFT is already burned, metadata deletion is secondary
+          }
+        } catch (ipfsErr) {
+          console.warn('⚠️ Error deleting metadata from IPFS:', ipfsErr.message);
+          // Continue - NFT is already burned
+        }
+      } else {
+        console.log('ℹ️ No token URI found, skipping IPFS deletion');
+      }
+
+      setSuccess(`Product #${tokenId} burned successfully!${tokenURI ? ' Metadata deleted from IPFS.' : ''}`);
+      
+      // Trigger webhook for product.burned event
+      try {
+        // Get product name before it's deleted
+        let productName = `Product #${tokenId}`;
+        try {
+          const product = products.find(p => p.tokenId === tokenId);
+          if (product?.metadata?.name) {
+            productName = product.metadata.name;
+          }
+        } catch (err) {
+          // Use default name if can't get product name
+        }
+
+        const webhookData = {
+          tokenId: tokenId.toString(),
+          burnedBy: account,
+          productName: productName,
+          tokenURI: tokenURI || null
+        };
+
+        const webhookResponse = await fetch(getBackendApiUrl('/webhooks/trigger'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            event: 'product.burned',
+            data: webhookData,
+            walletAddress: account
+          })
+        });
+
+        if (webhookResponse.ok) {
+          const webhookResult = await webhookResponse.json();
+          console.log('✅ Burn webhook triggered:', webhookResult);
+        } else {
+          console.warn('⚠️ Burn webhook trigger failed (non-critical)');
+        }
+      } catch (webhookErr) {
+        console.warn('⚠️ Burn webhook trigger error (non-critical):', webhookErr);
+      }
       
       // Reload products (burned products will be filtered out)
       await loadProducts();
     } catch (err) {
-      console.error('Delete error:', err);
-      setError(err.message || 'Failed to delete product');
+      console.error('❌ Delete error:', err);
+      const errorMessage = err.message || 'Failed to delete product';
+      setError(errorMessage);
+      
+      // Show error for a longer time
+      setTimeout(() => {
+        if (error === errorMessage) {
+          setError('');
+        }
+      }, 5000);
     } finally {
       setDeleteLoading(null);
     }
@@ -913,8 +1223,69 @@ function ProducerDashboard() {
         formData.warrantyPeriod
       );
 
+      // Register blockchain ID if module is available
+      if (hasProductIdentifier) {
+        try {
+          await productIdentifierService.registerProductId(
+            signer,
+            result.tokenId,
+            formData.model || formData.name || 'UNKNOWN',
+            formData.serialNumber || `SN-${result.tokenId}`
+          );
+          console.log('✅ Blockchain ID registered for product', result.tokenId);
+        } catch (err) {
+          console.warn('⚠️ Failed to register blockchain ID:', err.message);
+          // Don't fail product creation if blockchain ID registration fails
+        }
+      }
+
       setSuccess(`Product created successfully! Token ID: ${result.tokenId}`);
       setShowCreateForm(false);
+      
+      // Trigger webhook for product creation
+      try {
+        const webhookData = {
+          tokenId: result.tokenId.toString(),
+          productName: formData.name,
+          description: formData.description,
+          productType: formData.productType,
+          category: formData.category,
+          serialNumber: formData.serialNumber,
+          model: formData.model,
+          warrantyPeriod: formData.warrantyPeriod,
+          producer: account,
+          tokenURI: metadataResult.ipfsUrl,
+          metadata: {
+            name: formData.name,
+            description: formData.description,
+            category: formData.category,
+            model: formData.model,
+            manufacturer: formData.manufacturer
+          }
+        };
+
+        const webhookResponse = await fetch(getBackendApiUrl('/webhooks/trigger'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            event: 'product.created',
+            data: webhookData,
+            walletAddress: account
+          })
+        });
+
+        if (webhookResponse.ok) {
+          const webhookResult = await webhookResponse.json();
+          console.log('✅ Webhook triggered:', webhookResult);
+        } else {
+          console.warn('⚠️ Webhook trigger failed (non-critical)');
+        }
+      } catch (webhookErr) {
+        // Don't fail product creation if webhook fails
+        console.warn('⚠️ Webhook trigger error (non-critical):', webhookErr);
+      }
       
       // Reset form
       setFormData({
@@ -937,6 +1308,123 @@ function ProducerDashboard() {
       setError(err.message || 'Failed to create product');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleLinkGtin = async (tokenId) => {
+    const gtin = gtinInputs[tokenId]?.trim();
+    if (!gtin || gtin === '') {
+      setError('Please enter a GTIN');
+      return;
+    }
+    
+    // Validate GTIN format (8-14 digits)
+    const gtinRegex = /^\d{8,14}$/;
+    if (!gtinRegex.test(gtin)) {
+      setError('GTIN must be 8-14 digits');
+      return;
+    }
+    
+    setLinkingGtin(tokenId);
+    setError('');
+    
+    try {
+      await gtinLinkerService.linkGtin(signer, tokenId, gtin);
+      setSuccess(`GTIN ${gtin} linked to product #${tokenId}`);
+      
+      // Update local state
+      setProductGtins(prev => ({ ...prev, [tokenId]: gtin }));
+      setGtinInputs(prev => {
+        const newInputs = { ...prev };
+        delete newInputs[tokenId];
+        return newInputs;
+      });
+      
+      // Reload identifiers
+      await loadProductIdentifiers();
+    } catch (err) {
+      console.error('GTIN linking error:', err);
+      if (err.message?.includes('GTIN already linked')) {
+        setError('This GTIN is already linked to another product');
+      } else if (err.message?.includes('Product already has GTIN')) {
+        setError('This product already has a GTIN linked');
+      } else if (err.message?.includes('Only producer')) {
+        setError('Only the product producer can link GTIN');
+      } else {
+        setError(err.message || 'Failed to link GTIN');
+      }
+    } finally {
+      setLinkingGtin(null);
+    }
+  };
+
+  const handleBatchCreate = async (e) => {
+    e.preventDefault();
+    if (!signer) {
+      setError('Wallet not connected');
+      return;
+    }
+    
+    const count = parseInt(e.target.count?.value || 50);
+    if (count < 1 || count > 1000) {
+      setError('Please enter a number between 1 and 1000');
+      return;
+    }
+
+    setBatchCreating(true);
+    setError('');
+    setSuccess('');
+    setBatchProgress({});
+    
+    // Use current form data as template
+    const template = {
+      ...formData,
+      name: formData.name || 'Batch Product',
+      description: formData.description || 'Product created via batch creation',
+      serialNumber: formData.serialNumber || 'BATCH',
+      category: formData.category || 'Batch',
+      productType: formData.productType || 'physical',
+      warrantyPeriod: formData.warrantyPeriod || 365,
+      manufacturer: formData.manufacturer || { name: '', address: '', country: '', website: '' },
+      specifications: formData.specifications || {},
+      images: formData.images || []
+    };
+
+    try {
+      console.log(`🚀 Starting batch creation of ${count} products...`);
+      
+      const results = await createProductsFromTemplate(
+        signer,
+        template,
+        count,
+        (index, total, status, result) => {
+          setBatchProgress(prev => ({
+            ...prev,
+            [index]: { status, result, progress: ((index + 1) / total * 100).toFixed(1) }
+          }));
+        }
+      );
+
+      const successful = results.filter(r => r.success).length;
+      const failed = results.filter(r => !r.success).length;
+      
+      console.log(`✅ Batch creation complete: ${successful} successful, ${failed} failed`);
+      
+      setSuccess(`Batch creation complete! ${successful} products created successfully${failed > 0 ? `, ${failed} failed` : ''}`);
+      setShowBatchCreate(false);
+      
+      // Reload products after a delay (to allow transactions to confirm)
+      setTimeout(() => {
+        loadProducts();
+      }, 5000);
+    } catch (err) {
+      console.error('Batch creation error:', err);
+      setError(err.message || 'Failed to create products in batch');
+    } finally {
+      setBatchCreating(false);
+      setTimeout(() => {
+        setBatchProgress({});
+      }, 10000);
     }
   };
 
@@ -1006,9 +1494,27 @@ function ProducerDashboard() {
           <button 
             className="btn btn-primary"
             onClick={() => setShowCreateForm(!showCreateForm)}
-            disabled={!!roleError || loading}
+            disabled={!!roleError || loading || batchCreating}
           >
             {showCreateForm ? 'Cancel' : '+ Create Product'}
+          </button>
+          <button 
+            className="btn"
+            onClick={() => setShowWebhookManager(!showWebhookManager)}
+            disabled={!!roleError || !isConnected}
+            style={{ backgroundColor: '#9C27B0', color: 'white' }}
+            title="Manage webhooks for ERP integration"
+          >
+            {showWebhookManager ? 'Close Webhooks' : '🔗 Webhooks'}
+          </button>
+          <button 
+            className="btn"
+            onClick={() => setShowBatchCreate(!showBatchCreate)}
+            disabled={!!roleError || loading || batchCreating}
+            style={{ backgroundColor: '#4CAF50', color: 'white' }}
+            title="Create multiple products quickly (50+ per minute)"
+          >
+            {showBatchCreate ? 'Cancel' : '⚡ Batch Create'}
           </button>
           
           {/* Select Mode Toggle */}
@@ -1292,6 +1798,88 @@ function ProducerDashboard() {
         </div>
       )}
 
+      {showBatchCreate && (
+        <div className="form-section card" style={{ backgroundColor: '#f0f8ff', border: '2px solid #4CAF50' }}>
+          <h2>⚡ Batch Product Creation</h2>
+          <p style={{ color: '#666', marginBottom: '1rem' }}>
+            Create multiple products quickly using the current form as a template. 
+            Products will be created with sequential serial numbers.
+          </p>
+          <form onSubmit={handleBatchCreate}>
+            <div className="form-row">
+              <div className="input-group">
+                <label>Number of Products *</label>
+                <input
+                  name="count"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  defaultValue="50"
+                  required
+                  placeholder="e.g., 50"
+                />
+                <small style={{ color: '#666', marginTop: '0.25rem', display: 'block' }}>
+                  Recommended: 50-100 products per batch for optimal performance
+                </small>
+              </div>
+            </div>
+
+            {Object.keys(batchProgress).length > 0 && (
+              <div style={{ 
+                marginTop: '1rem', 
+                padding: '1rem', 
+                backgroundColor: '#e8f5e9', 
+                borderRadius: '4px',
+                maxHeight: '200px',
+                overflowY: 'auto'
+              }}>
+                <strong>Progress:</strong>
+                <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
+                  {Object.entries(batchProgress).slice(-10).map(([index, progress]) => (
+                    <div key={index} style={{ marginBottom: '0.25rem' }}>
+                      Product {parseInt(index) + 1}: {progress.status} 
+                      {progress.result?.txHash && (
+                        <span style={{ color: '#4CAF50', marginLeft: '0.5rem' }}>
+                          ✓ {progress.result.txHash.substring(0, 10)}...
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: '1rem', display: 'flex', gap: '0.75rem' }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={batchCreating || !signer}
+                style={{ flex: 1 }}
+              >
+                {batchCreating ? (
+                  <>
+                    <span className="loading"></span> Creating Products...
+                  </>
+                ) : (
+                  '⚡ Start Batch Creation'
+                )}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setShowBatchCreate(false);
+                  setBatchProgress({});
+                }}
+                disabled={batchCreating}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div className="card">
         <h2>
           My Products ({products.length})
@@ -1433,12 +2021,77 @@ function ProducerDashboard() {
                     </p>
                   )}
                   <p style={{ marginTop: '0.5rem' }}>Token ID: {product.tokenId}</p>
+                  
+                  {/* Blockchain ID */}
+                  {hasProductIdentifier && productBlockchainIds[product.tokenId] && (
+                    <p style={{ fontSize: '0.85rem', color: '#4CAF50', marginTop: '0.25rem', wordBreak: 'break-all' }}>
+                      🆔 Blockchain ID: {productBlockchainIds[product.tokenId].substring(0, 50)}...
+                    </p>
+                  )}
+                  
+                  {/* GTIN */}
+                  {hasGtinLinker && productGtins[product.tokenId] && (
+                    <p style={{ fontSize: '0.85rem', color: '#2196F3', marginTop: '0.25rem' }}>
+                      🏷️ GTIN: {productGtins[product.tokenId]}
+                    </p>
+                  )}
+                  
                   <p>Type: {product.productType || 'N/A'}</p>
                   <div className="product-meta">
                     <span className="badge badge-primary">Producer</span>
                     <span>Warranty: {product.metadata?.warrantyPeriod || product.warrantyPeriod || 0} days</span>
                   </div>
                 </div>
+                
+                {/* GTIN Linking UI (only for producer, only if module available, only if no GTIN yet) */}
+                {hasGtinLinker && 
+                 product.producer?.toLowerCase() === account?.toLowerCase() && 
+                 !productGtins[product.tokenId] && (
+                  <div style={{ 
+                    marginTop: '0.75rem', 
+                    padding: '0.75rem', 
+                    backgroundColor: '#f0f8ff', 
+                    borderRadius: '4px',
+                    border: '1px solid #2196F3'
+                  }}>
+                    <div style={{ fontSize: '0.9rem', marginBottom: '0.5rem', color: '#666' }}>
+                      Link GS1/GTIN (optional)
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <input
+                        type="text"
+                        placeholder="Enter GTIN (8-14 digits)"
+                        value={gtinInputs[product.tokenId] || ''}
+                        onChange={(e) => setGtinInputs(prev => ({
+                          ...prev,
+                          [product.tokenId]: e.target.value
+                        }))}
+                        maxLength={14}
+                        pattern="[0-9]{8,14}"
+                        style={{ 
+                          flex: 1,
+                          padding: '0.5rem', 
+                          fontSize: '0.9rem',
+                          border: '1px solid #ddd',
+                          borderRadius: '4px'
+                        }}
+                      />
+                      <button
+                        onClick={() => handleLinkGtin(product.tokenId)}
+                        disabled={linkingGtin === product.tokenId || !gtinInputs[product.tokenId]}
+                        className="btn btn-small"
+                        style={{ 
+                          backgroundColor: '#2196F3', 
+                          color: 'white',
+                          padding: '0.5rem 1rem',
+                          fontSize: '0.9rem'
+                        }}
+                      >
+                        {linkingGtin === product.tokenId ? 'Linking...' : '🔗 Link'}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="action-buttons" style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <button
                     className="btn btn-primary"
@@ -1635,6 +2288,25 @@ function ProducerDashboard() {
           onSuccess={handleReceiveSuccess}
           onError={(err) => setError(err)}
         />
+      )}
+
+      {/* Webhook Manager */}
+      {showWebhookManager && (
+        <div style={{ 
+          marginTop: '2rem', 
+          width: '100%', 
+          padding: '1rem',
+          backgroundColor: '#f9f9f9',
+          border: '2px solid #2196F3',
+          borderRadius: '8px'
+        }}>
+          <WebhookManager
+            account={account}
+            onClose={() => {
+              setShowWebhookManager(false);
+            }}
+          />
+        </div>
       )}
     </div>
   );

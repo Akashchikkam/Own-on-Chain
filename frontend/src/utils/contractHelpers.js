@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { loadContractAddresses, CONTRACT_ADDRESSES } from '../contracts/config';
+import { loadContractAddresses, CONTRACT_ADDRESSES, LOCALHOST_ADDRESSES, SEPOLIA_ADDRESSES } from '../contracts/config';
 
 // Import ABIs as JavaScript modules
 import ParticipantRegistryABI from '../contracts/ParticipantRegistry.js';
@@ -7,35 +7,52 @@ import ProductNFTABI from '../contracts/ProductNFT.js';
 import SupplyChainABI from '../contracts/SupplyChain.js';
 
 let contractAddresses = null;
+let addressesPromise = null;
 
-// Initialize contract addresses
-async function initAddresses() {
-  // Always reload to ensure we're using latest addresses (in case config changed)
-  const network = import.meta.env.VITE_NETWORK_NAME || 'localhost';
-  console.log(`🔍 [initAddresses] Loading addresses for network: ${network}`);
-  
-  contractAddresses = await loadContractAddresses();
-  console.log('🔗 Contract addresses initialized:', contractAddresses);
-  console.log(`🔗 SupplyChain address: ${contractAddresses.SupplyChain}`);
-  
-  // Validate addresses
-  if (!contractAddresses.ParticipantRegistry || 
-      !contractAddresses.ProductNFT || 
-      !contractAddresses.SupplyChain) {
-    console.error('❌ Invalid contract addresses:', contractAddresses);
-    throw new Error('Contract addresses not properly configured. Please deploy contracts first.');
+// Initialize contract addresses (cached to avoid repeated calls)
+export async function initAddresses() {
+  // Return cached addresses if available
+  if (contractAddresses) {
+    return contractAddresses;
   }
   
-  // CRITICAL: Verify SupplyChain address matches expected new contract
-  const expectedSepoliaAddress = '0xfef50a2a46C7E89B108F9d5986B5BC72767B8c6B';
-  if (network === 'sepolia' && contractAddresses.SupplyChain.toLowerCase() !== expectedSepoliaAddress.toLowerCase()) {
-    console.error(`❌ [initAddresses] WRONG SUPPLYCHAIN ADDRESS!`);
-    console.error(`   Current: ${contractAddresses.SupplyChain}`);
-    console.error(`   Expected: ${expectedSepoliaAddress}`);
-    console.error(`   This will cause products to be created in the wrong contract!`);
+  // If already loading, wait for that promise
+  if (addressesPromise) {
+    return addressesPromise;
   }
   
-  return contractAddresses;
+  // Start loading addresses
+  addressesPromise = (async () => {
+    // loadContractAddresses will detect the actual network from chainId
+    // So we don't need to pass network here
+    contractAddresses = await loadContractAddresses();
+    const detectedNetwork = (contractAddresses.SupplyChain === LOCALHOST_ADDRESSES.SupplyChain) ? 'localhost' : 
+                           (contractAddresses.SupplyChain === SEPOLIA_ADDRESSES.SupplyChain) ? 'sepolia' : 'unknown';
+    console.log(`🔍 [initAddresses] Detected network: ${detectedNetwork}`);
+    console.log('🔗 Contract addresses initialized:', contractAddresses);
+    console.log(`🔗 SupplyChain address: ${contractAddresses.SupplyChain}`);
+    
+    // Validate addresses
+    if (!contractAddresses.ParticipantRegistry || 
+        !contractAddresses.ProductNFT || 
+        !contractAddresses.SupplyChain) {
+      console.error('❌ Invalid contract addresses:', contractAddresses);
+      throw new Error('Contract addresses not properly configured. Please deploy contracts first.');
+    }
+    
+    // CRITICAL: Verify SupplyChain address matches expected new contract
+    const expectedSepoliaAddress = '0xfef50a2a46C7E89B108F9d5986B5BC72767B8c6B';
+    if (detectedNetwork === 'sepolia' && contractAddresses.SupplyChain.toLowerCase() !== expectedSepoliaAddress.toLowerCase()) {
+      console.error(`❌ [initAddresses] WRONG SUPPLYCHAIN ADDRESS!`);
+      console.error(`   Current: ${contractAddresses.SupplyChain}`);
+      console.error(`   Expected: ${expectedSepoliaAddress}`);
+      console.error(`   This will cause products to be created in the wrong contract!`);
+    }
+    
+    return contractAddresses;
+  })();
+  
+  return addressesPromise;
 }
 
 // Get ParticipantRegistry contract instance
@@ -392,299 +409,151 @@ export const supplyChainService = {
   },
 
   // Batch transfer to distributor (single transaction for multiple products)
-  // NEVER falls back - if batch function exists, it must be used
   async batchTransferToDistributor(signer, tokenIds, distributorAddress, waitForConfirmation = true) {
-    const contract = await getSupplyChainContract(signer);
     const addresses = await initAddresses();
+    const contract = await getSupplyChainContract(signer);
     
-    // CRITICAL: Debug ABI loading
-    console.log(`🔍 Checking ABI...`);
-    console.log(`   SupplyChainABI type:`, typeof SupplyChainABI);
-    console.log(`   SupplyChainABI keys:`, Object.keys(SupplyChainABI || {}));
-    console.log(`   ABI has abi property:`, !!SupplyChainABI?.abi);
-    console.log(`   ABI length:`, SupplyChainABI?.abi?.length);
+    console.log(`🚀 Batch Transfer to Distributor`);
+    console.log(`   Contract: ${addresses.SupplyChain}`);
+    console.log(`   Products: ${tokenIds.length} (${tokenIds.join(', ')})`);
+    console.log(`   Recipient: ${distributorAddress}`);
     
-    // Check if batch function exists in ABI
-    const abiHasBatchFunction = SupplyChainABI?.abi?.some(item => 
-      item.type === 'function' && item.name === 'batchTransferToDistributor'
-    );
-    console.log(`   ABI contains batchTransferToDistributor:`, abiHasBatchFunction);
-    
-    // CRITICAL: Log contract address being used
-    console.log(`📍 Using SupplyChain contract at address: ${addresses.SupplyChain}`);
-    console.log(`🔍 Verifying batchTransferToDistributor function exists...`);
-    
-    // CRITICAL: Check if function exists in contract interface (more reliable than checking contract object)
     try {
-      // Check if function exists in the contract interface
-      const functionExists = contract.interface.hasFunction('batchTransferToDistributor');
-      const batchFunctions = Object.keys(contract.interface.functions || {}).filter(f => f.includes('batch'));
+      // Verify ABI has batch function
+      const hasBatchInABI = SupplyChainABI?.abi?.some(item => 
+        item.type === 'function' && item.name === 'batchTransferToDistributor'
+      );
       
-      console.log(`   Contract interface has batchTransferToDistributor:`, functionExists);
-      console.log(`   Batch functions in interface:`, batchFunctions);
-      
-      if (!functionExists) {
-        console.error(`❌ FUNCTION NOT FOUND: batchTransferToDistributor does not exist in contract interface`);
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        console.error(`   ABI has function:`, abiHasBatchFunction);
-        console.error(`   Available batch functions:`, batchFunctions);
-        console.error(`   All functions:`, Object.keys(contract.interface.functions || {}).slice(0, 15));
-        console.error(`   This means the ABI being used does NOT match the deployed contract`);
-        console.error(`   Possible causes:`);
-        console.error(`   1. Browser cache - try hard refresh (Ctrl+Shift+R)`);
-        console.error(`   2. ABI file mismatch - SupplyChain.js may be outdated`);
-        console.error(`   3. Contract address mismatch - contract at ${addresses.SupplyChain} may not have batch functions`);
-        throw new Error('batchTransferToDistributor function does not exist in contract interface');
+      if (!hasBatchInABI) {
+        console.error('❌ Batch function not found in ABI');
+        throw new Error('Batch function not available in contract ABI. Please update SupplyChain.js with latest ABI.');
       }
       
-      console.log(`✅ Batch function exists in contract interface!`);
-      console.log(`✅ Attempting batch transfer for ${tokenIds.length} products...`);
-      console.log(`   Token IDs: ${tokenIds.join(', ')}`);
-      console.log(`   Recipient: ${distributorAddress}`);
-      console.log(`   Contract: ${addresses.SupplyChain}`);
+      // Call the batch function directly
+      const tx = await contract.batchTransferToDistributor(tokenIds, distributorAddress);
       
-      // Call the batch function directly - this will create ONE transaction
-      // Try direct method first (like other functions), fallback to getFunction if needed
-      let tx;
-      if (contract.batchTransferToDistributor) {
-        tx = await contract.batchTransferToDistributor(tokenIds, distributorAddress);
-      } else {
-        // Fallback: use getFunction if direct method doesn't exist
-        const batchFunction = contract.getFunction('batchTransferToDistributor');
-        tx = await batchFunction(tokenIds, distributorAddress);
-      }
-      
-      console.log(`✅ Batch transaction created! Hash: ${tx.hash}`);
-      console.log(`   ⚠️ CRITICAL CHECK: MetaMask should show ONE transaction request`);
-      console.log(`   ⚠️ If you see multiple requests, STOP and check console for errors`);
-      console.log(`   Single MetaMask signature required for ${tokenIds.length} products`);
+      console.log(`✅ Transaction created: ${tx.hash}`);
+      console.log(`   ⚠️ MetaMask should show ONE transaction request`);
       
       if (waitForConfirmation) {
         await tx.wait();
+        console.log(`✅ Transaction confirmed`);
       }
+      
       return tx;
     } catch (err) {
-      // Log the full error first for debugging
-      console.error('❌ Batch transfer error details:', {
-        code: err.code,
-        message: err.message,
-        data: err.data,
-        reason: err.reason,
-        error: err.error
-      });
+      console.error('❌ Batch transfer error:', err);
       
-      // Check if error indicates function doesn't exist (VERY SPECIFIC checks)
-      // IMPORTANT: Don't match "Product does not exist" - that's a revert, not a missing function
-      const isFunctionNotExist = (
-        // Check for specific "function doesn't exist" patterns
-        (err.message && (
-          err.message.includes('is not a function') ||
-          err.message.includes('function does not exist') ||
-          err.message.includes('does not exist in contract interface') ||
-          err.message.includes('batchTransferToDistributor function does not exist')
-        )) ||
-        // Check error codes that indicate missing function
+      // Check if it's a "function doesn't exist" error
+      const isMissingFunction = (
+        err.message?.includes('is not a function') ||
+        err.message?.includes('function does not exist') ||
         err.code === 'UNSUPPORTED_OPERATION' ||
-        (err.code === 'CALL_EXCEPTION' && err.message && err.message.includes('function') && !err.message.includes('Product')) ||
-        (err.code === 'BAD_DATA' && err.message && err.message.includes('batchTransferToDistributor'))
-      ) && !err.message?.includes('Product does not exist'); // Explicitly exclude product validation errors
+        (err.code === 'BAD_DATA' && err.message?.includes('batchTransferToDistributor'))
+      ) && !err.message?.includes('Product does not exist') && !err.message?.includes('Invalid product status');
       
-      if (isFunctionNotExist) {
-        console.error('❌ Batch function batchTransferToDistributor does NOT exist on deployed contract!');
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        console.error('   ACTION REQUIRED:');
-        console.error('   1. Deploy new SupplyChain contract with batch functions');
-        console.error('   2. Update SupplyChain address in frontend/src/contracts/config.js');
-        console.error('   3. Hard refresh browser (Ctrl+Shift+R or Cmd+Shift+R)');
-        console.error('   4. Reload the application');
-        throw new Error(`Batch function not available at contract ${addresses.SupplyChain}. Please deploy new contract with batchTransferToDistributor function.`);
+      if (isMissingFunction) {
+        throw new Error(`Batch function not available at contract ${addresses.SupplyChain}. Please deploy contract with batchTransferToDistributor function.`);
       }
       
-      // Log the actual error for debugging
-      console.error('❌ Batch transfer failed with error:', err);
-      console.error('   Error code:', err.code);
-      console.error('   Error message:', err.message);
-      console.error('   Error data:', err.data);
-      console.error('   Error reason:', err.reason);
-      console.error('   Contract address:', addresses.SupplyChain);
-      console.error('   Full error:', err);
-      
-      // If error code is 3 (execution reverted), it means the function exists but reverted
-      // This is NOT a "function doesn't exist" error
+      // Handle contract revert errors
       if (err.code === 3 || err.code === 'CALL_EXCEPTION') {
-        console.error('⚠️ This is a contract REVERT error, not a missing function error.');
-        console.error('⚠️ The batch function EXISTS and was called, but the transaction reverted.');
-        console.error('⚠️ Possible causes:');
-        console.error('   1. One or more products do not exist (Product does not exist)');
-        console.error('   2. You are not the owner of one or more products (Not current owner)');
-        console.error('   3. Invalid product status for transfer');
-        console.error('   4. Recipient is not a verified distributor');
+        let revertReason = err.reason || err.message || 'Transaction reverted';
         
-        // Extract the actual revert reason if available
-        let revertReason = err.message || 'Transaction reverted';
-        if (err.reason) {
-          revertReason = err.reason;
-        } else if (err.data && typeof err.data === 'string' && err.data.startsWith('0x08c379a0')) {
-          // Try to decode the error data (Solidity error encoding)
+        // Try to decode error data
+        if (err.data && typeof err.data === 'string' && err.data.startsWith('0x08c379a0')) {
           try {
             const decoded = contract.interface.parseError(err.data);
             if (decoded) {
-              revertReason = decoded.args[0] || decoded.name;
+              revertReason = decoded.args[0] || decoded.name || revertReason;
             }
           } catch (decodeErr) {
-            // If decoding fails, use the message
+            // Use original reason if decoding fails
           }
         }
         
-        throw new Error(`Batch transfer failed: ${revertReason}. Please check that all products exist and you own them.`);
+        throw new Error(`Batch transfer failed: ${revertReason}`);
       }
       
-      // Re-throw ALL other errors - do NOT fall back to individual transfers
-      // If batch function exists, it MUST be used
+      // Re-throw other errors
       throw err;
     }
   },
 
   // Batch transfer to retailer (single transaction for multiple products)
-  // NEVER falls back - if batch function exists, it must be used
   async batchTransferToRetailer(signer, tokenIds, retailerAddress, waitForConfirmation = true) {
-    const contract = await getSupplyChainContract(signer);
     const addresses = await initAddresses();
+    const contract = await getSupplyChainContract(signer);
     
-    // Check if function exists in contract interface (more reliable)
+    console.log(`🚀 Batch Transfer to Retailer`);
+    console.log(`   Contract: ${addresses.SupplyChain}`);
+    console.log(`   Products: ${tokenIds.length} (${tokenIds.join(', ')})`);
+    console.log(`   Recipient: ${retailerAddress}`);
+    
     try {
-      const functionExists = contract.interface.hasFunction('batchTransferToRetailer');
-      
-      if (!functionExists) {
-        console.error(`❌ FUNCTION NOT FOUND: batchTransferToRetailer does not exist in contract interface`);
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        throw new Error('batchTransferToRetailer function does not exist in contract interface');
-      }
-      
-      console.log(`✅ Batch function exists! Attempting batch transfer for ${tokenIds.length} products...`);
-      console.log(`   Token IDs: ${tokenIds.join(', ')}`);
-      console.log(`   Recipient: ${retailerAddress}`);
-      
-      // Call the batch function directly - this will create ONE transaction
-      // Try direct method first (like other functions), fallback to getFunction if needed
-      let tx;
-      if (contract.batchTransferToRetailer) {
-        tx = await contract.batchTransferToRetailer(tokenIds, retailerAddress);
-      } else {
-        // Fallback: use getFunction if direct method doesn't exist
-        const batchFunction = contract.getFunction('batchTransferToRetailer');
-        tx = await batchFunction(tokenIds, retailerAddress);
-      }
-      
-      console.log(`✅ Batch transaction created! Hash: ${tx.hash}`);
-      console.log(`   ⚠️ IMPORTANT: MetaMask should show ONE transaction request`);
-      console.log(`   ⚠️ If you see multiple requests, the batch function is not working correctly`);
-      console.log(`   Single MetaMask signature required for ${tokenIds.length} products`);
+      const tx = await contract.batchTransferToRetailer(tokenIds, retailerAddress);
+      console.log(`✅ Transaction created: ${tx.hash}`);
       
       if (waitForConfirmation) {
         await tx.wait();
       }
+      
       return tx;
     } catch (err) {
-      // Check if error indicates function doesn't exist (clear signal)
-      const isFunctionNotExist = err.message && (
-        err.message.includes('is not a function') || 
-        err.message.includes('batchTransferToRetailer') ||
-        err.message.includes('does not exist') ||
+      const isMissingFunction = (
+        err.message?.includes('is not a function') ||
         err.code === 'UNSUPPORTED_OPERATION' ||
-        (err.code === 'CALL_EXCEPTION' && err.message.includes('function')) ||
-        (err.code === 'BAD_DATA' && err.message.includes('batchTransferToRetailer'))
-      );
+        (err.code === 'BAD_DATA' && err.message?.includes('batchTransferToRetailer'))
+      ) && !err.message?.includes('Product does not exist') && !err.message?.includes('Invalid product status');
       
-      if (isFunctionNotExist) {
-        console.error('❌ Batch function batchTransferToRetailer does NOT exist on deployed contract!');
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        console.error('   ACTION REQUIRED:');
-        console.error('   1. Deploy new SupplyChain contract with batch functions');
-        console.error('   2. Update SupplyChain address in frontend/src/contracts/config.js');
-        console.error('   3. Hard refresh browser (Ctrl+Shift+R or Cmd+Shift+R)');
-        throw new Error('Batch function not available. Please redeploy SupplyChain contract with batchTransferToRetailer function.');
+      if (isMissingFunction) {
+        throw new Error(`Batch function not available at contract ${addresses.SupplyChain}. Please deploy contract with batchTransferToRetailer function.`);
       }
       
-      console.error('❌ Batch transfer failed with error:', err);
-      console.error('   Error code:', err.code);
-      console.error('   Error message:', err.message);
-      console.error('   Error data:', err.data);
-      console.error('   Full error:', err);
+      if (err.code === 3 || err.code === 'CALL_EXCEPTION') {
+        const revertReason = err.reason || err.message || 'Transaction reverted';
+        throw new Error(`Batch transfer failed: ${revertReason}`);
+      }
       
-      // Re-throw ALL other errors - do NOT fall back
       throw err;
     }
   },
 
   // Batch sell to buyer (single transaction for multiple products)
-  // NEVER falls back - if batch function exists, it must be used
   async batchSellToBuyer(signer, tokenIds, buyerAddress, saleDetailsIpfs, waitForConfirmation = true) {
-    const contract = await getSupplyChainContract(signer);
     const addresses = await initAddresses();
+    const contract = await getSupplyChainContract(signer);
     
-    // Check if function exists in contract interface (more reliable)
+    console.log(`🚀 Batch Sell to Buyer`);
+    console.log(`   Contract: ${addresses.SupplyChain}`);
+    console.log(`   Products: ${tokenIds.length} (${tokenIds.join(', ')})`);
+    console.log(`   Recipient: ${buyerAddress}`);
+    
     try {
-      const functionExists = contract.interface.hasFunction('batchSellToBuyer');
-      
-      if (!functionExists) {
-        console.error(`❌ FUNCTION NOT FOUND: batchSellToBuyer does not exist in contract interface`);
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        throw new Error('batchSellToBuyer function does not exist in contract interface');
-      }
-      
-      console.log(`✅ Batch function exists! Attempting batch transfer for ${tokenIds.length} products...`);
-      console.log(`   Token IDs: ${tokenIds.join(', ')}`);
-      console.log(`   Recipient: ${buyerAddress}`);
-      
-      // Call the batch function directly - this will create ONE transaction
-      // Try direct method first (like other functions), fallback to getFunction if needed
-      let tx;
-      if (contract.batchSellToBuyer) {
-        tx = await contract.batchSellToBuyer(tokenIds, buyerAddress, saleDetailsIpfs);
-      } else {
-        // Fallback: use getFunction if direct method doesn't exist
-        const batchFunction = contract.getFunction('batchSellToBuyer');
-        tx = await batchFunction(tokenIds, buyerAddress, saleDetailsIpfs);
-      }
-      
-      console.log(`✅ Batch transaction created! Hash: ${tx.hash}`);
-      console.log(`   ⚠️ IMPORTANT: MetaMask should show ONE transaction request`);
-      console.log(`   ⚠️ If you see multiple requests, the batch function is not working correctly`);
-      console.log(`   Single MetaMask signature required for ${tokenIds.length} products`);
+      const tx = await contract.batchSellToBuyer(tokenIds, buyerAddress, saleDetailsIpfs);
+      console.log(`✅ Transaction created: ${tx.hash}`);
       
       if (waitForConfirmation) {
         await tx.wait();
       }
+      
       return tx;
     } catch (err) {
-      // Check if error indicates function doesn't exist (clear signal)
-      const isFunctionNotExist = err.message && (
-        err.message.includes('is not a function') || 
-        err.message.includes('batchSellToBuyer') ||
-        err.message.includes('does not exist') ||
+      const isMissingFunction = (
+        err.message?.includes('is not a function') ||
         err.code === 'UNSUPPORTED_OPERATION' ||
-        (err.code === 'CALL_EXCEPTION' && err.message.includes('function')) ||
-        (err.code === 'BAD_DATA' && err.message.includes('batchSellToBuyer'))
-      );
+        (err.code === 'BAD_DATA' && err.message?.includes('batchSellToBuyer'))
+      ) && !err.message?.includes('Product does not exist') && !err.message?.includes('Invalid product status');
       
-      if (isFunctionNotExist) {
-        console.error('❌ Batch function batchSellToBuyer does NOT exist on deployed contract!');
-        console.error(`   Contract address: ${addresses.SupplyChain}`);
-        console.error('   ACTION REQUIRED:');
-        console.error('   1. Deploy new SupplyChain contract with batch functions');
-        console.error('   2. Update SupplyChain address in frontend/src/contracts/config.js');
-        console.error('   3. Hard refresh browser (Ctrl+Shift+R or Cmd+Shift+R)');
-        throw new Error('Batch function not available. Please redeploy SupplyChain contract with batchSellToBuyer function.');
+      if (isMissingFunction) {
+        throw new Error(`Batch function not available at contract ${addresses.SupplyChain}. Please deploy contract with batchSellToBuyer function.`);
       }
       
-      console.error('❌ Batch transfer failed with error:', err);
-      console.error('   Error code:', err.code);
-      console.error('   Error message:', err.message);
-      console.error('   Error data:', err.data);
-      console.error('   Full error:', err);
+      if (err.code === 3 || err.code === 'CALL_EXCEPTION') {
+        const revertReason = err.reason || err.message || 'Transaction reverted';
+        throw new Error(`Batch transfer failed: ${revertReason}`);
+      }
       
-      // Re-throw ALL other errors - do NOT fall back
       throw err;
     }
   },

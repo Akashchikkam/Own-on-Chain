@@ -30,12 +30,14 @@ async function main() {
   const productNFTAddress = await productNFT.getAddress();
   console.log("ProductNFT deployed to:", productNFTAddress);
 
-  // Deploy SupplyChain
+  // Deploy SupplyChain (with optional module addresses set to zero)
   console.log("\n3. Deploying SupplyChain...");
   const SupplyChain = await hre.ethers.getContractFactory("SupplyChain");
   const supplyChain = await SupplyChain.deploy(
     participantRegistryAddress,
-    productNFTAddress
+    productNFTAddress,
+    "0x0000000000000000000000000000000000000000", // ProductIdentifier (optional, set later)
+    "0x0000000000000000000000000000000000000000"  // GtinLinker (optional, set later)
   );
   await supplyChain.waitForDeployment();
   const supplyChainAddress = await supplyChain.getAddress();
