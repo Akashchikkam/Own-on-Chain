@@ -142,3 +142,5 @@ For questions or issues, please open an issue on GitHub.
 ---
 
 **Graphite Setup Test:** Testing Graphite CLI workflow for managing pull requests and stacks.
+
+**Stack Test:** This is the second PR in a stack, demonstrating dependent pull requests.
