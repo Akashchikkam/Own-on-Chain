@@ -215,6 +215,140 @@ router.get('/list', async (req, res) => {
   }
 });
 
+// GET /api/webhooks/pending-products - Get pending product creation requests
+// IMPORTANT: This must come BEFORE /:id route to avoid route conflict
+router.get('/pending-products', async (req, res) => {
+  try {
+    const { walletAddress } = req.query;
+
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet address is required'
+      });
+    }
+
+    const { getPendingProducts } = await import('./incoming-product-service.js');
+    const pendingProducts = await getPendingProducts(walletAddress);
+
+    res.json({
+      success: true,
+      data: pendingProducts,
+      count: pendingProducts.length
+    });
+  } catch (error) {
+    console.error('Error getting pending products:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get pending products'
+    });
+  }
+});
+
+// POST /api/webhooks/pending-products/:id/process - Process a pending product (called from frontend)
+// IMPORTANT: This must come BEFORE /:id routes to avoid route conflict
+router.post('/pending-products/:id/process', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { walletAddress, tokenId, txHash } = req.body;
+
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet address is required'
+      });
+    }
+
+    // Update pending product status
+    const { updatePendingProduct, getPendingProductById } = await import('./incoming-product-service.js');
+    const pendingProduct = await getPendingProductById(id);
+
+    if (!pendingProduct) {
+      return res.status(404).json({
+        success: false,
+        error: 'Pending product not found'
+      });
+    }
+
+    if (pendingProduct.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized: This product belongs to a different wallet'
+      });
+    }
+
+    // Update status
+    const updated = await updatePendingProduct(id, {
+      status: 'completed',
+      processedAt: new Date().toISOString(),
+      tokenId: tokenId || null,
+      txHash: txHash || null
+    });
+
+    res.json({
+      success: true,
+      data: updated,
+      message: 'Product creation request marked as completed'
+    });
+  } catch (error) {
+    console.error('Error processing pending product:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process pending product'
+    });
+  }
+});
+
+// DELETE /api/webhooks/pending-products/:id - Delete/reject a pending product
+// IMPORTANT: This must come BEFORE /:id routes to avoid route conflict
+router.delete('/pending-products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { walletAddress } = req.query;
+
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet address is required'
+      });
+    }
+
+    const { updatePendingProduct, getAllPendingProducts } = await import('./incoming-product-service.js');
+    const allPending = await getAllPendingProducts();
+    const pendingProduct = allPending.find(p => p.id === id);
+
+    if (!pendingProduct) {
+      return res.status(404).json({
+        success: false,
+        error: 'Pending product not found'
+      });
+    }
+
+    if (pendingProduct.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized'
+      });
+    }
+
+    await updatePendingProduct(id, {
+      status: 'rejected',
+      processedAt: new Date().toISOString()
+    });
+
+    res.json({
+      success: true,
+      message: 'Pending product request rejected'
+    });
+  } catch (error) {
+    console.error('Error deleting pending product:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete pending product'
+    });
+  }
+});
+
 // GET /api/webhooks/:id - Get webhook details
 router.get('/:id', async (req, res) => {
   try {
@@ -458,7 +592,8 @@ router.get('/:id/logs', async (req, res) => {
 // POST /api/webhooks/incoming - Incoming webhook endpoint (for ERP systems to trigger product creation)
 router.post('/incoming', async (req, res) => {
   try {
-    const { signature, timestamp } = req.headers;
+    const signature = req.headers['x-webhook-signature'];
+    const timestamp = req.headers['x-webhook-timestamp'];
     const payload = req.body;
 
     // Validate signature
@@ -498,10 +633,29 @@ router.post('/incoming', async (req, res) => {
       });
     }
 
-    // Process the incoming webhook
-    // This is where you'd create products, update status, etc.
-    // For now, we'll just acknowledge receipt
+    // Process the incoming webhook - create product creation request
     console.log(`📥 Incoming webhook from ${webhook.url}:`, payload);
+
+    // Validate product data
+    const { validateProductData, storePendingProduct } = await import('./incoming-product-service.js');
+    const validation = validateProductData(payload);
+
+    if (!validation.isValid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid product data',
+        details: validation.errors
+      });
+    }
+
+    // Store pending product creation request
+    // Note: Actual product creation requires producer's wallet signature
+    // This will be processed when producer approves it in the dashboard
+    const pendingProduct = await storePendingProduct(
+      webhook.id,
+      webhook.walletAddress,
+      validation.validatedData
+    );
 
     // Update webhook stats
     webhook.lastTriggered = new Date().toISOString();
@@ -512,13 +666,16 @@ router.post('/incoming', async (req, res) => {
     await addWebhookLog(webhook.id, 'webhook.incoming', payload, {
       success: true,
       status: 200,
-      message: 'Webhook received and processed'
+      message: 'Product creation request queued',
+      pendingProductId: pendingProduct.id
     });
 
     res.json({
       success: true,
-      message: 'Webhook received successfully',
-      webhookId: webhook.id
+      message: 'Product creation request received and queued',
+      webhookId: webhook.id,
+      pendingProductId: pendingProduct.id,
+      note: 'Product will be created when producer approves the request'
     });
   } catch (error) {
     console.error('Error processing incoming webhook:', error);
@@ -558,6 +715,7 @@ router.post('/trigger', async (req, res) => {
     });
   }
 });
+
 
 export { router };
 

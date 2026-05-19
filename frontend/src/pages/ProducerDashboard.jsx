@@ -14,6 +14,7 @@ import SecureSendModal from '../components/SecureSendModal';
 import SecureReceiveModal from '../components/SecureReceiveModal';
 import BatchTransferModal from '../components/BatchTransferModal';
 import WebhookManager from '../components/WebhookManager';
+import PendingProductsManager from '../components/PendingProductsManager';
 import './Dashboard.css';
 
 function ProducerDashboard() {
@@ -2308,6 +2309,20 @@ function ProducerDashboard() {
           />
         </div>
       )}
+
+      {/* Pending Products Manager */}
+      <div style={{ marginTop: '2rem' }}>
+        <PendingProductsManager
+          account={account}
+          signer={signer}
+          provider={provider}
+          onProductCreated={(tokenId) => {
+            setSuccess(`Product created from ERP request! Token ID: ${tokenId}`);
+            loadProducts(); // Reload products list
+            setTimeout(() => setSuccess(''), 5000);
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -1,0 +1,23 @@
+{
+  "name": "own-on-chain-erp-integration",
+  "version": "1.0.0",
+  "description": "ERP Integration examples and helpers for Own-on-Chain",
+  "main": "examples/erp-integration-complete.js",
+  "scripts": {
+    "receiver": "node examples/erp-webhook-receiver.js",
+    "sender": "node examples/erp-webhook-sender.js",
+    "complete": "node examples/erp-integration-complete.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "keywords": [
+    "erp",
+    "webhook",
+    "integration",
+    "blockchain"
+  ],
+  "author": "",
+  "license": "MIT"
+}
+

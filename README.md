@@ -43,6 +43,14 @@ Each product gets a **unique digital identity (NFT token)** stored on the blockc
   - IPFS for metadata and document storage
   - No centralized database - all data on blockchain
 
+- **Webhook Integration (ERP Bridge)** ✅
+  - Real-time webhook notifications for product events
+  - HMAC signature verification for security
+  - Privacy-preserving transfer notifications
+  - Webhook management UI in Producer Dashboard
+  - Support for 4 event types: created, transferred, received, burned
+  - Delivery logs and retry mechanism
+
 ### 🚧 In Development / Planned
 
 **User Identity System:**
@@ -63,6 +71,8 @@ Each product gets a **unique digital identity (NFT token)** stored on the blockc
 - Create unique digital identities for products
 - Upload product information (images, specs, warranty)
 - Track products through supply chain
+- Register webhooks for ERP integration
+- Receive notifications when products are received
 
 ### For Distributors
 - Receive products from producers

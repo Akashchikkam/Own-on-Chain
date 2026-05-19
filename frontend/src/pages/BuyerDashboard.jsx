@@ -431,18 +431,81 @@ function BuyerDashboard() {
       // Extract token ID from scan result
       if (result.tokenId) {
         tokenId = result.tokenId;
+      } else if (result.productId) {
+        // Try backend lookup for product ID + serial
+        try {
+          const lookupResponse = await fetch(
+            getBackendApiUrl(`/product/lookup/${encodeURIComponent(result.productId)}/${encodeURIComponent(result.serialNumber || '')}`)
+          );
+          
+          if (lookupResponse.ok) {
+            const lookupResult = await lookupResponse.json();
+            if (lookupResult.success && lookupResult.data) {
+              tokenId = lookupResult.data.tokenId;
+            }
+          }
+        } catch (lookupErr) {
+          console.warn('Product ID lookup failed:', lookupErr);
+        }
+        
+        if (!tokenId) {
+          setError('Product ID lookup failed. Please scan QR code with token ID.');
+          return;
+        }
       } else if (result.url) {
+        // Parse URL to get token ID
         const urlPath = result.url.pathname;
         if (urlPath.includes('/verify/')) {
           tokenId = urlPath.split('/verify/')[1];
+        } else if (result.url.searchParams) {
+          // Handle /verify?id=xxx&serial=xxx format
+          const productId = result.url.searchParams.get('id');
+          const serial = result.url.searchParams.get('serial');
+          if (productId && serial) {
+            try {
+              const lookupResponse = await fetch(
+                getBackendApiUrl(`/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`)
+              );
+              
+              if (lookupResponse.ok) {
+                const lookupResult = await lookupResponse.json();
+                if (lookupResult.success && lookupResult.data) {
+                  tokenId = lookupResult.data.tokenId;
+                }
+              }
+            } catch (lookupErr) {
+              console.warn('Product ID lookup failed:', lookupErr);
+            }
+          }
         }
       } else if (result.raw) {
+        // Try to parse raw text as URL
         try {
           const url = new URL(result.raw);
           if (url.pathname.includes('/verify/')) {
             tokenId = url.pathname.split('/verify/')[1];
+          } else if (url.searchParams) {
+            const productId = url.searchParams.get('id');
+            const serial = url.searchParams.get('serial');
+            if (productId && serial) {
+              try {
+                const lookupResponse = await fetch(
+                  getBackendApiUrl(`/product/lookup/${encodeURIComponent(productId)}/${encodeURIComponent(serial)}`)
+                );
+                
+                if (lookupResponse.ok) {
+                  const lookupResult = await lookupResponse.json();
+                  if (lookupResult.success && lookupResult.data) {
+                    tokenId = lookupResult.data.tokenId;
+                  }
+                }
+              } catch (lookupErr) {
+                console.warn('Product ID lookup failed:', lookupErr);
+              }
+            }
           }
         } catch (e) {
+          // Not a URL, might be just token ID
           tokenId = result.raw;
         }
       }

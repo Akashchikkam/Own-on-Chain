@@ -4,7 +4,19 @@ This guide explains how to integrate your ERP system with Own-on-Chain using web
 
 ## Overview
 
-Webhooks allow your ERP system to automatically receive notifications when products are created, transferred, or updated in the Own-on-Chain system. This enables real-time synchronization between your ERP and the blockchain.
+Webhooks allow your ERP system to automatically receive notifications when products are created, transferred, received, or burned in the Own-on-Chain system. This enables real-time synchronization between your ERP and the blockchain.
+
+**Status**: ✅ **Fully Implemented** - All webhook events are working and tested.
+
+## Implemented Features
+
+- ✅ Webhook registration UI in Producer Dashboard
+- ✅ All 4 webhook events (created, transferred, received, burned)
+- ✅ HMAC signature generation and verification
+- ✅ Webhook delivery with retry mechanism
+- ✅ Delivery logs and statistics
+- ✅ Privacy-preserving transfers (only sender gets notified)
+- ✅ Test webhook functionality
 
 ## How It Works
 
@@ -68,6 +80,8 @@ X-Webhook-Timestamp: <unix-timestamp>
 
 ### Product Transferred Event
 
+**Privacy Note**: Only the **sender** (person who initiated the transfer) receives this webhook. The producer does NOT get notified when distributors/retailers transfer products to maintain privacy.
+
 ```json
 {
   "event": "product.transferred",
@@ -77,12 +91,20 @@ X-Webhook-Timestamp: <unix-timestamp>
     "from": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     "transferType": "toDistributor",
-    "timestamp": 1734115800
+    "productName": "iPhone 15 Pro"
   }
 }
 ```
 
+**Transfer Types**:
+- `toDistributor` - Transfer to distributor
+- `toRetailer` - Transfer to retailer
+- `toBuyer` - Sale to buyer
+- `transfer` - Generic transfer
+
 ### Product Received Event
+
+**Note**: This event is sent to the **producer** (who created the product) when someone confirms receipt. This allows producers to track when their products are physically received.
 
 ```json
 {
@@ -92,12 +114,15 @@ X-Webhook-Timestamp: <unix-timestamp>
     "tokenId": "123",
     "confirmedBy": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     "signature": "0x...",
-    "timestamp": 1734117600
+    "timestamp": 1734117600,
+    "productName": "iPhone 15 Pro"
   }
 }
 ```
 
 ### Product Burned Event
+
+**Note**: Only the person who burns the product receives this webhook.
 
 ```json
 {
@@ -106,7 +131,8 @@ X-Webhook-Timestamp: <unix-timestamp>
   "data": {
     "tokenId": "123",
     "burnedBy": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "timestamp": 1734120000
+    "productName": "iPhone 15 Pro",
+    "tokenURI": "ipfs://Qm..."
   }
 }
 ```
@@ -247,35 +273,78 @@ If your endpoint returns an error or times out, the system will automatically re
 }
 ```
 
-## Incoming Webhook (ERP → Own-on-Chain)
+## Incoming Webhook (ERP → Own-on-Chain) ✅
 
-You can also send webhooks TO Own-on-Chain to trigger product creation:
+You can send webhooks TO Own-on-Chain to trigger product creation requests. Products are queued for producer approval.
+
+### Endpoint
 
 ```
 POST https://yourapp.com/api/webhooks/incoming
 Content-Type: application/json
 X-Webhook-Signature: <your-computed-signature>
 X-Webhook-Timestamp: <unix-timestamp>
+```
 
+### Payload Format
+
+```json
 {
   "productName": "iPhone 15 Pro",
   "serialNumber": "SN123456",
-  "productId": "PROD-001",
+  "description": "Latest iPhone model",
   "category": "Electronics",
   "model": "A2848",
+  "productType": "physical",
   "warrantyPeriod": 365,
-  "metadata": {
-    "description": "Latest iPhone model",
-    "manufacturer": {
-      "name": "Apple Inc.",
-      "address": "1 Apple Park Way",
-      "country": "USA"
+  "manufacturer": {
+    "name": "Apple Inc.",
+    "address": "1 Apple Park Way",
+    "country": "USA",
+    "website": "https://apple.com"
+  },
+  "specifications": {
+    "storage": "256GB",
+    "color": "Natural Titanium"
+  },
+  "images": [
+    {
+      "url": "https://example.com/image.jpg",
+      "type": "main"
     }
-  }
+  ]
 }
 ```
 
-**Note**: This feature requires additional implementation to process incoming webhooks and create products. Currently, the endpoint validates signatures but doesn't create products automatically.
+### How It Works
+
+1. **ERP sends webhook** → Own-on-Chain validates signature
+2. **Product data validated** → Required fields checked
+3. **Request queued** → Stored as pending product creation request
+4. **Producer approves** → Product created on blockchain in Producer Dashboard
+5. **Outgoing webhook sent** → ERP receives `product.created` notification
+
+### Response
+
+```json
+{
+  "success": true,
+  "message": "Product creation request received and queued",
+  "webhookId": "1234567890",
+  "pendingProductId": "1763076000000",
+  "note": "Product will be created when producer approves the request"
+}
+```
+
+### Producer Approval Process
+
+1. Producer opens Producer Dashboard
+2. Sees "Pending Product Requests" section
+3. Reviews product details
+4. Clicks "✅ Approve & Create" to create product on blockchain
+5. Or clicks "❌ Reject" to discard request
+
+**Note**: Products require producer approval for security. The producer's wallet signature is needed to create products on the blockchain.
 
 ## Security Best Practices
 
@@ -381,5 +450,33 @@ For issues or questions:
 
 ---
 
-**Last Updated**: November 13, 2025
+## Webhook Event Summary
+
+| Event | Who Gets Notified | When It Happens | Privacy |
+|-------|------------------|-----------------|---------|
+| `product.created` | Producer | Product is created | ✅ Private |
+| `product.transferred` | Sender only | Product is transferred | ✅ Private (producer doesn't see distributor/retailer transfers) |
+| `product.received` | Producer | Receipt is confirmed | ✅ Private (only producer sees confirmations) |
+| `product.burned` | Person who burns | Product is deleted | ✅ Private |
+
+## Implementation Details
+
+### Automatic Webhook Triggers
+
+Webhooks are automatically triggered when:
+1. **Product Creation**: After successful product creation in Producer Dashboard
+2. **Product Transfer**: After successful transfer (sender gets notified)
+3. **Receipt Confirmation**: After recipient confirms physical receipt (producer gets notified)
+4. **Product Deletion**: After product is burned/deleted (person who deleted gets notified)
+
+### Privacy Protection
+
+- **Transfer Privacy**: Distributors and retailers can transfer products without the producer seeing every transfer
+- **Receipt Tracking**: Producers can track when their products are physically received
+- **Individual Notifications**: Each party only receives webhooks for their own actions
+
+---
+
+**Last Updated**: November 14, 2025  
+**Implementation Status**: ✅ Complete and Tested
 
